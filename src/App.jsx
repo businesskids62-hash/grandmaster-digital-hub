@@ -1,4 +1,4 @@
-import GrandmasterChat from "./pages/GrandmasterChat.jsx";
+import GrandmasterChat from "./GrandmasterChat.jsx";
 
 export default function App() {
   return <GrandmasterChat />;
