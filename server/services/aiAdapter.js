@@ -1,201 +1,239 @@
-/**
- * Grandmaster AI Service Adapter
- * Pluggable multi-provider backend service adapter.
- * Handles request timeouts, rate limits, input validation, and credential isolation.
- */
+// AI provider adapter. API keys stay on the server and are never sent to the browser.
+//
+// Supported providers (set AI_PROVIDER in server/.env):
+//   gemini    - Google Gemini API (default, model: gemini-3.8-flash)
+//   anthropic - Anthropic Messages API
+//   openai    - any OpenAI-compatible Chat Completions API (OpenAI, OpenRouter, Groq, local servers...)
 
-const SYSTEM_INSTRUCTION = `You are the Grandmaster AI, the core intelligence and digital architect of the Grandmaster Digital Hub (Learn, Build, Earn).
-Your role is to guide and empower learners, coders, and young digital entrepreneurs.
-You can communicate effectively in English and Roman Urdu (and Urdu script when requested).
-Be encouraging, intellectually rigorous, practical, and clear.
-Provide code snippets, project roadmaps, and business advice when requested.`;
+const SYSTEM_PROMPT =
+  "You are Grandmaster AI, a helpful assistant for coding, business planning, learning and project management. " +
+  "The user may write in English, Urdu or Roman Urdu; reply in the language they use. " +
+  "Be practical and honest. Never claim to have run code, created files, deployed anything or executed trades " +
+  "unless a tool result explicitly confirms it.";
 
-export async function generateAiReply({
-  message,
-  history = [],
-  provider = "gemini",
-  model = "gemini-3.8-flash",
-  apiKey,
-}) {
-  // Input validation
-  if (!message || typeof message !== "string" || !message.trim()) {
-    const error = new Error("Message content cannot be empty.");
-    error.status = 400;
-    error.code = "INVALID_INPUT";
-    throw error;
+const DEFAULTS = {
+  gemini: {
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    model: "gemini-3.8-flash",
+  },
+  anthropic: {
+    baseUrl: "https://api.anthropic.com",
+    model: "claude-sonnet-4-5",
+  },
+  openai: {
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+  },
+};
+
+export class AIError extends Error {
+  constructor(message, status = 502) {
+    super(message);
+    this.name = "AIError";
+    this.status = status;
   }
-
-  // Validate API Key presence
-  if (
-    !apiKey ||
-    typeof apiKey !== "string" ||
-    apiKey.trim() === "" ||
-    apiKey.trim() === "your_gemini_api_key_here"
-  ) {
-    const error = new Error(
-      "Google Gemini API key is not configured on the backend server. Please set GEMINI_API_KEY in the server .env file.",
-    );
-    error.status = 503;
-    error.code = "AI_CONFIG_MISSING";
-    throw error;
-  }
-
-  const selectedProvider = (provider || "gemini").toLowerCase();
-
-  if (selectedProvider === "gemini") {
-    return await callGeminiProvider({
-      message: message.trim(),
-      history,
-      model,
-      apiKey: apiKey.trim(),
-    });
-  }
-
-  const error = new Error(
-    `Unsupported AI provider: "${provider}". Configured providers: ["gemini"].`,
-  );
-  error.status = 400;
-  error.code = "UNSUPPORTED_PROVIDER";
-  throw error;
 }
 
-/**
- * Google Gemini REST Provider Implementation
- */
-async function callGeminiProvider({ message, history, model, apiKey }) {
-  const targetModel = model || "gemini-3.8-flash";
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(targetModel)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+export function getAIConfig(env = process.env) {
+  const provider = (env.AI_PROVIDER || "gemini").toLowerCase();
 
-  // Construct conversation contents for Gemini
-  const contents = [];
-
-  // Map previous history (limit to last 10 turns to avoid excessive context)
-  const recentHistory = Array.isArray(history) ? history.slice(-10) : [];
-  for (const entry of recentHistory) {
-    if (entry && entry.content && typeof entry.content === "string") {
-      const role = entry.role === "user" ? "user" : "model";
-      contents.push({
-        role,
-        parts: [{ text: entry.content }],
-      });
-    }
+  if (!DEFAULTS[provider]) {
+    return {
+      provider,
+      configured: false,
+      problem: `Unsupported AI_PROVIDER "${provider}". Use "gemini", "anthropic" or "openai".`,
+    };
   }
 
-  // Append latest user message
-  contents.push({
-    role: "user",
-    parts: [{ text: message }],
-  });
+  const apiKey = (env.AI_API_KEY || "").trim();
+  const baseUrl = (env.AI_BASE_URL || DEFAULTS[provider].baseUrl).replace(
+    /\/$/,
+    "",
+  );
+  const model = (env.AI_MODEL || DEFAULTS[provider].model).trim();
+  const timeoutMs =
+    Number(env.AI_TIMEOUT_MS) > 0 ? Number(env.AI_TIMEOUT_MS) : 60000;
+  const maxTokens =
+    Number(env.AI_MAX_TOKENS) > 0 ? Number(env.AI_MAX_TOKENS) : 2048;
 
-  const requestBody = {
-    contents,
-    systemInstruction: {
-      parts: [{ text: SYSTEM_INSTRUCTION }],
-    },
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 2048,
-    },
+  return {
+    provider,
+    baseUrl,
+    model,
+    apiKey,
+    timeoutMs,
+    maxTokens,
+    configured: Boolean(apiKey),
+    problem: apiKey ? "" : "AI_API_KEY is not set in server/.env.",
   };
+}
 
-  // 30-second request timeout
+function toMessages(history, message) {
+  const cleaned = history
+    .filter(
+      (item) =>
+        item &&
+        (item.role === "user" || item.role === "assistant") &&
+        typeof item.content === "string",
+    )
+    .map((item) => ({ role: item.role, content: item.content }));
+
+  // Providers require the conversation to start with a user turn.
+  while (cleaned.length && cleaned[0].role !== "user") cleaned.shift();
+
+  // Merge consecutive same-role turns (Anthropic rejects them).
+  const merged = [];
+  for (const item of [...cleaned, { role: "user", content: message }]) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === item.role) {
+      last.content += `\n\n${item.content}`;
+    } else {
+      merged.push({ ...item });
+    }
+  }
+  return merged;
+}
+
+async function postJson(url, { headers, body, timeoutMs }) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
+    const text = await response.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
 
     if (!response.ok) {
-      let errorDetail = "";
-      try {
-        const errorJson = await response.json();
-        errorDetail = errorJson.error?.message || response.statusText;
-      } catch {
-        errorDetail = response.statusText;
-      }
-
-      // Debug log: shows the real Gemini error in the node terminal
-      console.error("[Gemini ERROR]", response.status, errorDetail);
-
-      if (
-        response.status === 400 &&
-        errorDetail.toLowerCase().includes("api_key")
-      ) {
-        const err = new Error(
-          "The configured GEMINI_API_KEY is invalid or expired. Please check your credentials in .env.",
-        );
-        err.status = 401;
-        err.code = "INVALID_API_KEY";
-        throw err;
-      }
-
-      if (response.status === 429) {
-        const err = new Error(
-          "Gemini API rate limit exceeded. Please wait a moment before sending another message.",
-        );
-        err.status = 429;
-        err.code = "RATE_LIMIT_EXCEEDED";
-        throw err;
-      }
-
-      const err = new Error(
-        `Google Gemini API error (${response.status}): ${errorDetail}`,
-      );
-      err.status = response.status;
-      err.code = "PROVIDER_ERROR";
-      throw err;
+      const detail =
+        data?.error?.message || data?.message || `HTTP ${response.status}`;
+      const status =
+        response.status === 401 || response.status === 403
+          ? 502
+          : response.status === 429
+            ? 429
+            : 502;
+      throw new AIError(`AI provider error: ${detail}`, status);
     }
 
-    const data = await response.json();
-
-    // Validate response payload
-    const candidate = data.candidates?.[0];
-    if (!candidate || !candidate.content?.parts?.[0]?.text) {
-      if (candidate?.finishReason === "SAFETY") {
-        const err = new Error(
-          "The response was blocked by Gemini safety filters.",
-        );
-        err.status = 422;
-        err.code = "CONTENT_FILTERED";
-        throw err;
-      }
-      const err = new Error(
-        "Gemini returned an empty or unparseable response.",
-      );
-      err.status = 502;
-      err.code = "EMPTY_RESPONSE";
-      throw err;
-    }
-
-    const replyText = candidate.content.parts[0].text;
-
-    return {
-      reply: replyText,
-      provider: "gemini",
-      model: targetModel,
-      timestamp: new Date().toISOString(),
-    };
+    return data;
   } catch (error) {
-    clearTimeout(timeoutId);
-
-    if (error.name === "AbortError") {
-      const timeoutErr = new Error(
-        "The request to Google Gemini timed out after 30 seconds.",
-      );
-      timeoutErr.status = 504;
-      timeoutErr.code = "TIMEOUT";
-      throw timeoutErr;
-    }
-
-    throw error;
+    if (error instanceof AIError) throw error;
+    if (error.name === "AbortError")
+      throw new AIError("AI provider request timed out.", 504);
+    throw new AIError(`Could not reach the AI provider: ${error.message}`, 502);
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+async function callGemini(config, messages) {
+  const data = await postJson(
+    `${config.baseUrl}/models/${encodeURIComponent(config.model)}:generateContent`,
+    {
+      timeoutMs: config.timeoutMs,
+      headers: { "x-goog-api-key": config.apiKey },
+      body: {
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: messages.map((item) => ({
+          role: item.role === "assistant" ? "model" : "user",
+          parts: [{ text: item.content }],
+        })),
+        generationConfig: { maxOutputTokens: config.maxTokens },
+      },
+    },
+  );
+
+  const parts = data?.candidates?.[0]?.content?.parts;
+
+  if (!Array.isArray(parts)) {
+    const reason =
+      data?.promptFeedback?.blockReason || data?.candidates?.[0]?.finishReason;
+    throw new AIError(
+      reason
+        ? `Gemini returned no answer (${reason}).`
+        : "AI provider returned an empty response.",
+      502,
+    );
+  }
+
+  // Skip "thought" parts; keep only the visible answer text.
+  return parts
+    .filter((part) => typeof part.text === "string" && !part.thought)
+    .map((part) => part.text)
+    .join("");
+}
+
+async function callAnthropic(config, messages) {
+  const data = await postJson(`${config.baseUrl}/v1/messages`, {
+    timeoutMs: config.timeoutMs,
+    headers: {
+      "x-api-key": config.apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: {
+      model: config.model,
+      max_tokens: config.maxTokens,
+      system: SYSTEM_PROMPT,
+      messages,
+    },
+  });
+
+  const text = Array.isArray(data?.content)
+    ? data.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("")
+    : "";
+
+  return text;
+}
+
+async function callOpenAI(config, messages) {
+  const data = await postJson(`${config.baseUrl}/chat/completions`, {
+    timeoutMs: config.timeoutMs,
+    headers: { Authorization: `Bearer ${config.apiKey}` },
+    body: {
+      model: config.model,
+      max_tokens: config.maxTokens,
+      messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
+    },
+  });
+
+  return data?.choices?.[0]?.message?.content || "";
+}
+
+export async function generateReply(
+  { message, history = [] },
+  env = process.env,
+) {
+  const config = getAIConfig(env);
+
+  if (!config.configured) {
+    throw new AIError(config.problem || "AI provider is not configured.", 503);
+  }
+
+  const messages = toMessages(history, message);
+  const callers = {
+    gemini: callGemini,
+    anthropic: callAnthropic,
+    openai: callOpenAI,
+  };
+  const reply = await callers[config.provider](config, messages);
+
+  if (typeof reply !== "string" || !reply.trim()) {
+    throw new AIError("AI provider returned an empty response.", 502);
+  }
+
+  return reply.trim();
 }

@@ -1,92 +1,159 @@
+import "dotenv/config";
 import express from "express";
-import path from "path";
-import dotenv from "dotenv";
-import { fileURLToPath } from "url";
+import cors from "cors";
+import { AIError, generateReply, getAIConfig } from "./services/aiAdapter.js";
 
-// --- Setup for ES Module ---
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.resolve(__dirname, "../.env") });
+const PORT = Number(process.env.PORT) || 3001;
+const MAX_MESSAGE_CHARS = 8000;
+const MAX_HISTORY_ITEMS = 12;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_PER_MINUTE) || 30;
 
-const app = express();
-const PORT = 5000;
+const allowedOrigins = (
+  process.env.CORS_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173"
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
-// --- Middleware ---
-// Manual CORS - no library needed, layer.js error khatam!
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept",
-  );
-  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
+export function createApp() {
+  const app = express();
 
-app.use(express.json());
+  app.disable("x-powered-by");
+  app.use(express.json({ limit: "100kb" }));
 
-// --- Direct Gemini AI - No Adapter Needed ---
-async function generateResponse(userMessage) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY .env me nahi hai");
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
-
-  const body = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: userMessage }],
+  app.use(
+    cors({
+      origin(origin, callback) {
+        // Allow same-origin / non-browser requests (no Origin header) and listed origins.
+        if (!origin || allowedOrigins.includes(origin))
+          return callback(null, true);
+        return callback(new Error("Origin not allowed by CORS."));
       },
-    ],
-    systemInstruction: {
-      parts: [
-        {
-          text: "You are Grandmaster Meta AI, brain of GRANDMASTER ROBOT. Call user General. Speak in Roman Urdu + English mix, friendly, with emojis 🔥. You are expert in MERN Stack, Trading, AI.",
-        },
-      ],
-    },
-  };
+    }),
+  );
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+  // Simple in-memory rate limiter for the chat endpoint.
+  const hits = new Map();
+  function rateLimit(req, res, next) {
+    const now = Date.now();
+    const key = req.ip || "unknown";
+    const recent = (hits.get(key) || []).filter(
+      (time) => now - time < RATE_LIMIT_WINDOW_MS,
+    );
+
+    if (recent.length >= RATE_LIMIT_MAX) {
+      return res
+        .status(429)
+        .json({
+          error: "Too many requests. Please wait a minute and try again.",
+        });
+    }
+
+    recent.push(now);
+    hits.set(key, recent);
+    return next();
+  }
+
+  app.get("/api/health", (req, res) => {
+    const config = getAIConfig();
+
+    res.json({
+      status: "ok",
+      aiConfigured: config.configured,
+      provider: config.provider,
+      // Shown as the "model" label in the dashboard.
+      model: config.configured
+        ? `${config.provider} · ${config.model}`
+        : "AI not configured",
+      time: new Date().toISOString(),
+    });
   });
 
-  const data = await response.json();
+  app.post("/api/chat", rateLimit, async (req, res, next) => {
+    try {
+      const { message, history } = req.body || {};
 
-  if (!response.ok) {
-    console.error("Gemini API Error:", data);
-    throw new Error(data.error?.message || "Gemini API Failed");
-  }
+      if (typeof message !== "string" || !message.trim()) {
+        return res
+          .status(400)
+          .json({ error: "A non-empty 'message' string is required." });
+      }
 
-  return (
-    data.candidates?.[0]?.content?.parts?.[0]?.text ||
-    "Ji General! 🔥 Main hazir hun!"
-  );
+      if (message.length > MAX_MESSAGE_CHARS) {
+        return res
+          .status(400)
+          .json({
+            error: `Message is too long (max ${MAX_MESSAGE_CHARS} characters).`,
+          });
+      }
+
+      if (history !== undefined && !Array.isArray(history)) {
+        return res.status(400).json({ error: "'history' must be an array." });
+      }
+
+      const safeHistory = (history || [])
+        .slice(-MAX_HISTORY_ITEMS)
+        .filter((item) => item && typeof item.content === "string")
+        .map((item) => ({
+          role: item.role === "user" ? "user" : "assistant",
+          content: item.content.slice(0, MAX_MESSAGE_CHARS),
+        }));
+
+      const reply = await generateReply({
+        message: message.trim(),
+        history: safeHistory,
+      });
+      return res.json({ reply });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  app.use("/api", (req, res) => {
+    res.status(404).json({ error: "Endpoint not found." });
+  });
+
+  // eslint-disable-next-line no-unused-vars
+  app.use((error, req, res, next) => {
+    if (error instanceof AIError) {
+      console.error(`[ai] ${error.status} ${error.message}`);
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    if (error?.type === "entity.parse.failed") {
+      return res.status(400).json({ error: "Request body is not valid JSON." });
+    }
+
+    if (error?.type === "entity.too.large") {
+      return res.status(413).json({ error: "Request body is too large." });
+    }
+
+    if (error?.message === "Origin not allowed by CORS.") {
+      return res.status(403).json({ error: error.message });
+    }
+
+    console.error("[server] Unexpected error:", error);
+    return res.status(500).json({ error: "Internal server error." });
+  });
+
+  return app;
 }
 
-// --- Routes ---
-app.get("/api/health", (req, res) => {
-  res.json({ status: "READY", key: !!process.env.GEMINI_API_KEY });
-});
+const isMain =
+  process.argv[1] &&
+  import.meta.url === new URL(`file://${process.argv[1]}`).href;
 
-app.post("/api/chat", async (req, res) => {
-  try {
-    const { message } = req.body;
-    if (!message) return res.status(400).json({ error: "Message empty" });
+if (isMain) {
+  const app = createApp();
+  const config = getAIConfig();
 
-    const reply = await generateResponse(message);
-    res.json({ reply, status: "COMPLETE" });
-  } catch (e) {
-    console.error(e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// --- Start ---
-app.listen(PORT, () => {
-  console.log(`✅ GRANDMASTER ROBOT RUNNING on http://localhost:${PORT}`);
-});
+  app.listen(PORT, () => {
+    console.log(`Grandmaster server listening on http://localhost:${PORT}`);
+    console.log(
+      config.configured
+        ? `AI provider: ${config.provider} (${config.model})`
+        : `AI provider NOT ready: ${config.problem}`,
+    );
+  });
+}
