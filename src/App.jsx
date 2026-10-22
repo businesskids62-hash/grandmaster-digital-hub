@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-
+import { useVoice } from "./hooks/useVoice";
+import { useAttachments } from "./useAttachments";
+import AttachButton from "./AttachButton";
 // Set window.GRANDMASTER_API_BASE (e.g. in index.html) to point at your backend.
 // Empty string means same-origin requests like /api/chat.
 const API_BASE = (
@@ -254,6 +256,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .gm-btn.primary { background:linear-gradient(135deg,var(--gold2),var(--gold));color:#211706;border-color:transparent; }
 .gm-btn.ghost { background:transparent; }
 .gm-btn.danger { color:var(--red); }
+.gm-btn.listening { border-color:var(--red);color:var(--red); }
 .gm-grid { display:grid;gap:15px; }
 .gm-stats { grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:20px; }
 .gm-card { background:linear-gradient(145deg,#121622,#0e111a);border:1px solid var(--border);border-radius:15px;padding:18px;min-width:0; }
@@ -389,7 +392,7 @@ function readSavedData() {
 
 async function apiRequest(path, options = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
+  const timer = setTimeout(() => controller.abort(), 90000);
 
   try {
     const response = await fetch(`${API_BASE}${path}`, {
@@ -402,7 +405,14 @@ async function apiRequest(path, options = {}) {
     });
 
     if (!response.ok) {
-      throw new Error(`Request failed (${response.status})`);
+      let detail = "";
+      try {
+        const body = await response.json();
+        detail = body?.error ? `: ${body.error}` : "";
+      } catch {
+        detail = "";
+      }
+      throw new Error(`Request failed (${response.status})${detail}`);
     }
 
     return await response.json();
@@ -466,6 +476,9 @@ function EmptyState({ children }) {
 }
 
 export default function App() {
+  // Voice: user mic (speech-to-text) + agent speaker (text-to-speech).
+  const voice = useVoice({ listenLang: "ur-PK", speakLang: "en-IN" });
+  const att = useAttachments();
   const [page, setPage] = useState("overview");
   const [menuOpen, setMenuOpen] = useState(false);
   const [backend, setBackend] = useState("CHECKING");
@@ -542,13 +555,11 @@ export default function App() {
 
   async function checkHealth() {
     setRefreshing(true);
-
     try {
       const data = await apiRequest("/api/health", { method: "GET" });
 
       setBackend("LIVE");
       setHealthError("");
-
       if (typeof data.primary === "string") {
         setModel(data.primary);
       } else if (typeof data.model === "string") {
@@ -619,37 +630,43 @@ Do not claim that files were written, tests were run, or deployments succeeded u
       setBuilding(false);
     }
   }
-
   async function sendChat(event) {
     event?.preventDefault();
 
     const value = chatInput.trim();
+    const sentFiles = att.files;
 
-    if (!value || sending) return;
+    if ((!value && sentFiles.length === 0) || sending) return;
 
     if (backend !== "LIVE") {
       setChatError("Backend offline hai. Connection check karein.");
       return;
     }
 
-    const updatedHistory = [...history, { role: "user", text: value }];
+    const label = sentFiles.length ? ` 📎 ${sentFiles.length} attachment` : "";
+    const updatedHistory = [
+      ...history,
+      { role: "user", text: (value || "(attachment)") + label },
+    ];
 
     setHistory(updatedHistory);
     setChatInput("");
+    att.clear();
     setSending(true);
     setChatError("");
 
     try {
-      const reply = await askGrandmaster(value, history);
-
-      setHistory((previous) => [
-        ...previous,
-        { role: "assistant", text: reply },
+      const reply = await askGrandmaster(value, history, sentFiles);
+      setHistory([
+        ...updatedHistory,
+        {
+          role: "assistant",
+          text: typeof reply === "string" ? reply : reply.text,
+          model: reply.model,
+        },
       ]);
-
-      logActivity("Grandmaster AI conversation updated.");
-    } catch (error) {
-      setChatError(error.message || "AI response unavailable.");
+    } catch (err) {
+      setChatError("Request fail ho gayi. Dobara try karein.");
     } finally {
       setSending(false);
     }
@@ -667,1221 +684,1227 @@ Do not claim that files were written, tests were run, or deployments succeeded u
     }
   }
 
-  function addTask(event) {
-    event.preventDefault();
+  link.href = url;
+  link.download = "grandmaster-project-data.json";
+  link.click();
 
-    const title = taskInput.trim();
+  URL.revokeObjectURL(url);
+  setToast("Project data export prepared.");
+}
 
-    if (!title) return;
+function renderOverview() {
+  const currentStep = Math.min(completedCount + 1, 100);
 
-    setTasks((previous) => [
-      {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        title,
-        done: false,
-        createdAt: new Date().toISOString(),
-      },
-      ...previous,
-    ]);
-
-    setTaskInput("");
-    logActivity(`Task created: ${title}`);
-    setToast("Task added successfully.");
-  }
-
-  function toggleTask(id) {
-    const task = tasks.find((item) => item.id === id);
-    if (!task) return;
-
-    const nextDone = !task.done;
-
-    setTasks((previous) =>
-      previous.map((item) =>
-        item.id === id ? { ...item, done: nextDone } : item,
-      ),
-    );
-    logActivity(`${nextDone ? "Completed" : "Reopened"} task: ${task.title}`);
-  }
-
-  function deleteTask(id) {
-    setTasks((previous) => previous.filter((task) => task.id !== id));
-    logActivity("Task removed.");
-    setToast("Task removed.");
-  }
-
-  function toggleStep(number) {
-    const exists = completedSteps.includes(number);
-
-    setCompletedSteps((previous) =>
-      exists
-        ? previous.filter((item) => item !== number)
-        : [...previous, number].sort((a, b) => a - b),
-    );
-
-    logActivity(
-      `Roadmap step ${number} ${exists ? "reopened" : "marked complete"} in local tracker.`,
-    );
-  }
-
-  function togglePhase(letter) {
-    setExpandedPhases((previous) =>
-      previous.includes(letter)
-        ? previous.filter((item) => item !== letter)
-        : [...previous, letter],
-    );
-  }
-
-  function clearChat() {
-    setHistory([
-      {
-        role: "assistant",
-        text: "New conversation started. Grandmaster AI kis kaam mein madad kare?",
-      },
-    ]);
-
-    setChatError("");
-    setToast("New conversation started.");
-  }
-
-  function useSuggestion(value) {
-    setPrompt(value);
-    setPage("builder");
-    setTimeout(() => promptRef.current?.focus(), 50);
-  }
-
-  function downloadData() {
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      tasks,
-      completedSteps,
-      activity,
-    };
-
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: "application/json",
-    });
-
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-
-    link.href = url;
-    link.download = "grandmaster-project-data.json";
-    link.click();
-
-    URL.revokeObjectURL(url);
-    setToast("Project data export prepared.");
-  }
-
-  function renderOverview() {
-    const currentStep = Math.min(completedCount + 1, 100);
-
-    return (
-      <>
-        <section className="gm-welcome">
-          <div>
-            <div className="gm-kicker">Central Command · TAJ Edition</div>
-            <h1 className="gm-h1">
-              Welcome to <span className="gm-gradient">Grandmaster.</span>
-            </h1>
-            <p className="gm-muted" style={{ margin: 0 }}>
-              AI partner, development command center aur business workspace.
-            </p>
-          </div>
-
-          <button
-            className="gm-btn primary"
-            onClick={() => navigate("assistant")}
-          >
-            ✦ Talk to Grandmaster
-          </button>
-        </section>
-
-        <div className="gm-grid gm-stats">
-          <StatCard
-            icon="◈"
-            title="Roadmap Progress"
-            value={`${completedCount}/100`}
-            note="Locally tracked completed steps"
-          />
-          <StatCard
-            icon="▣"
-            title="My Tasks"
-            value={taskCount}
-            note={`${finishedTasks} completed · ${taskCount - finishedTasks} remaining`}
-          />
-          <StatCard
-            icon="⬡"
-            title="Agent Modules"
-            value="20"
-            note="Defined modules · live execution unverified"
-          />
-          <StatCard
-            icon="✦"
-            title="AI Backend"
-            value={
-              backend === "LIVE"
-                ? "LIVE"
-                : backend === "OFF"
-                  ? "OFFLINE"
-                  : "CHECKING"
-            }
-            note={backend === "LIVE" ? model : "Actual provider status"}
-          />
+  return (
+    <>
+      <section className="gm-welcome">
+        <div>
+          <div className="gm-kicker">Central Command · TAJ Edition</div>
+          <h1 className="gm-h1">
+            Welcome to <span className="gm-gradient">Grandmaster.</span>
+          </h1>
+          <p className="gm-muted" style={{ margin: 0 }}>
+            AI partner, development command center aur business workspace.
+          </p>
         </div>
 
-        <div className="gm-grid gm-two">
-          <section className="gm-card">
-            <SectionHeader
-              title="Current Mission"
-              subtitle="100-step engineering roadmap"
-              action={
-                <button
-                  className="gm-btn ghost"
-                  onClick={() => navigate("roadmap")}
-                >
-                  View roadmap →
-                </button>
-              }
-            />
+        <button
+          className="gm-btn primary"
+          onClick={() => navigate("assistant")}
+        >
+          ✦ Talk to Grandmaster
+        </button>
+      </section>
 
-            <div
-              style={{
-                display: "flex",
-                gap: 13,
-                alignItems: "center",
-                marginBottom: 18,
-              }}
-            >
-              <div className="gm-stat-icon" style={{ width: 45, height: 45 }}>
-                ◈
-              </div>
-              <div>
-                <div style={{ fontWeight: 800, fontSize: 13 }}>
-                  {completedCount === 100
-                    ? "All roadmap steps marked complete"
-                    : `Step ${currentStep} — ${ROADMAP[currentStep - 1]}`}
-                </div>
-                <div className="gm-muted gm-small">
-                  Actual project health must be checked independently.
-                </div>
-              </div>
-            </div>
+      <div className="gm-grid gm-stats">
+        <StatCard
+          icon="◈"
+          title="Roadmap Progress"
+          value={`${completedCount}/100`}
+          note="Locally tracked completed steps"
+        />
+        <StatCard
+          icon="▣"
+          title="My Tasks"
+          value={taskCount}
+          note={`${finishedTasks} completed · ${taskCount - finishedTasks} remaining`}
+        />
+        <StatCard
+          icon="⬡"
+          title="Agent Modules"
+          value="20"
+          note="Defined modules · live execution unverified"
+        />
+        <StatCard
+          icon="✦"
+          title="AI Backend"
+          value={
+            backend === "LIVE"
+              ? "LIVE"
+              : backend === "OFF"
+                ? "OFFLINE"
+                : "CHECKING"
+          }
+          note={backend === "LIVE" ? model : "Actual provider status"}
+        />
+      </div>
 
-            <div className="gm-progress">
-              <div
-                className="gm-progress-fill"
-                style={{ width: `${completedCount}%` }}
-              />
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                marginTop: 8,
-              }}
-            >
-              <span className="gm-muted gm-small">Tracked progress</span>
-              <strong className="gm-small">{completedCount}%</strong>
-            </div>
-
-            <div className="gm-divider" />
-
-            <div className="gm-notice">
-              <strong>Important:</strong> Roadmap checkboxes record your local
-              progress. They do not automatically inspect or verify source code.
-            </div>
-          </section>
-
-          <section className="gm-card">
-            <SectionHeader
-              title="System Health"
-              subtitle="Live backend connectivity check"
-              action={
-                <button
-                  className="gm-btn ghost"
-                  onClick={checkHealth}
-                  disabled={refreshing}
-                >
-                  {refreshing ? "Checking…" : "↻ Refresh"}
-                </button>
-              }
-            />
-
-            <div className="gm-list">
-              <div className="gm-list-row">
-                <span className="gm-row-icon">⌘</span>
-                <div className="gm-row-main">
-                  <div className="gm-row-title">Backend API</div>
-                  <div className="gm-row-sub">/api/health</div>
-                </div>
-                <StatusPill
-                  type={
-                    backend === "LIVE"
-                      ? "green"
-                      : backend === "OFF"
-                        ? "red"
-                        : ""
-                  }
-                >
-                  {backend}
-                </StatusPill>
-              </div>
-
-              <div className="gm-list-row">
-                <span className="gm-row-icon">✦</span>
-                <div className="gm-row-main">
-                  <div className="gm-row-title">AI Provider</div>
-                  <div className="gm-row-sub">{model}</div>
-                </div>
-                <StatusPill type={backend === "LIVE" ? "green" : ""}>
-                  {backend === "LIVE" ? "API REACHABLE" : "UNVERIFIED"}
-                </StatusPill>
-              </div>
-
-              <div className="gm-list-row">
-                <span className="gm-row-icon">⬢</span>
-                <div className="gm-row-main">
-                  <div className="gm-row-title">Trading Safety</div>
-                  <div className="gm-row-sub">
-                    No live trading initiated by this dashboard
-                  </div>
-                </div>
-                <StatusPill type="green">LOCKED</StatusPill>
-              </div>
-            </div>
-
-            {healthError && (
-              <p className="gm-muted gm-small" style={{ marginTop: 12 }}>
-                {healthError}
-              </p>
-            )}
-          </section>
-        </div>
-
-        <section className="gm-card" style={{ marginBottom: 20 }}>
-          <SectionHeader
-            title="Quick Actions"
-            subtitle="Open a workspace to continue your mission"
-          />
-
-          <div className="gm-quick-grid">
-            {[
-              ["✦", "AI Assistant", "Ask questions or plan work", "assistant"],
-              [
-                "⌘",
-                "App Builder",
-                "Generate implementation guidance",
-                "builder",
-              ],
-              ["⬡", "Agent Center", "Review the 20 defined modules", "agents"],
-              ["▤", "Roadmap", "Track your 100 development steps", "roadmap"],
-              ["▣", "Tasks", "Manage projects and action items", "projects"],
-              [
-                "⬢",
-                "Security",
-                "Review operational safety controls",
-                "security",
-              ],
-            ].map(([icon, title, desc, target]) => (
-              <button
-                className="gm-quick"
-                key={target}
-                onClick={() => navigate(target)}
-              >
-                <div className="gm-quick-icon">{icon}</div>
-                <div className="gm-quick-title">{title}</div>
-                <div className="gm-quick-desc">{desc}</div>
-              </button>
-            ))}
-          </div>
-        </section>
-
+      <div className="gm-grid gm-two">
         <section className="gm-card">
           <SectionHeader
-            title="Recent Activity"
-            subtitle="Actions recorded by this dashboard"
+            title="Current Mission"
+            subtitle="100-step engineering roadmap"
+            action={
+              <button
+                className="gm-btn ghost"
+                onClick={() => navigate("roadmap")}
+              >
+                View roadmap →
+              </button>
+            }
           />
 
-          {activity.length === 0 ? (
-            <EmptyState>
-              No activity recorded yet. Start a task or update a roadmap step.
-            </EmptyState>
-          ) : (
-            <div className="gm-list">
-              {activity.slice(0, 5).map((item) => (
-                <div className="gm-list-row" key={item.id}>
-                  <span className="gm-row-icon">↗</span>
-                  <div className="gm-row-main">
-                    <div className="gm-row-title">{item.message}</div>
-                    <div className="gm-row-sub">{item.time}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      </>
-    );
-  }
-
-  function renderAssistant() {
-    return (
-      <>
-        <section className="gm-welcome">
-          <div>
-            <div className="gm-kicker">AI Brain · Conversation Workspace</div>
-            <h1 className="gm-h1">
-              Grandmaster <span className="gm-gradient">AI</span>
-            </h1>
-            <p className="gm-muted" style={{ margin: 0 }}>
-              Coding, business, learning, planning aur project assistance.
-            </p>
-          </div>
-
-          <button className="gm-btn" onClick={clearChat}>
-            ＋ New chat
-          </button>
-        </section>
-
-        <div className="gm-notice" style={{ marginBottom: 15 }}>
-          AI responses require a working backend and configured provider.
-          Conversation history currently remains in this browser session.
-        </div>
-
-        <section className="gm-chat">
-          <div className="gm-output-head">
-            <div>
-              <strong>GRANDMASTER AI</strong>
-              <div className="gm-muted gm-small">{model}</div>
-            </div>
-            <StatusPill type={backend === "LIVE" ? "green" : "red"}>
-              {backend === "LIVE" ? "CONNECTED" : "UNAVAILABLE"}
-            </StatusPill>
-          </div>
-
-          <div className="gm-messages">
-            {history.map((message, index) => (
-              <div
-                className={`gm-message ${message.role === "user" ? "user" : "ai"}`}
-                key={index}
-              >
-                {message.text}
-              </div>
-            ))}
-
-            {sending && (
-              <div className="gm-message ai" role="status">
-                Grandmaster is thinking…
-              </div>
-            )}
-
-            <div ref={messagesEndRef} />
-          </div>
-
-          {chatError && (
-            <div className="gm-notice danger" style={{ margin: 12 }}>
-              {chatError}
-            </div>
-          )}
-
-          <form className="gm-chat-form" onSubmit={sendChat}>
-            <textarea
-              className="gm-field"
-              value={chatInput}
-              onChange={(event) => setChatInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  sendChat();
-                }
-              }}
-              placeholder="Grandmaster ko apna command dein…"
-              aria-label="Message Grandmaster AI"
-            />
-
-            <button
-              className="gm-btn primary"
-              type="submit"
-              disabled={sending || backend !== "LIVE" || !chatInput.trim()}
-            >
-              {sending ? "…" : "➤ Send"}
-            </button>
-          </form>
-        </section>
-      </>
-    );
-  }
-
-  function renderBuilder() {
-    return (
-      <>
-        <section className="gm-welcome">
-          <div>
-            <div className="gm-kicker">Software Engineering Workspace</div>
-            <h1 className="gm-h1">
-              AI <span className="gm-gradient">App Builder</span>
-            </h1>
-            <p className="gm-muted" style={{ margin: 0 }}>
-              Apna idea describe karein aur implementation guidance hasil
-              karein.
-            </p>
-          </div>
-        </section>
-
-        <section className="gm-builder">
-          <div className="gm-card-head">
-            <div>
-              <h2>What do you want to build?</h2>
-              <p>
-                Describe the app, features, technology and expected behavior.
-              </p>
-            </div>
-            <span className="gm-stat-icon">⌘</span>
-          </div>
-
-          <form
-            className="gm-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              handleBuild();
-            }}
-          >
-            <textarea
-              ref={promptRef}
-              className="gm-field gm-textarea"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Example: Improve Grandmaster's React dashboard, preserve existing routes, connect the AI backend securely, add tests, and explain every changed file…"
-              aria-label="Application requirements"
-            />
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 12,
-                flexWrap: "wrap",
-              }}
-            >
-              <span className="gm-muted gm-small">
-                {backend === "LIVE"
-                  ? "Backend reachable"
-                  : "Backend connection required"}
-              </span>
-
-              <button
-                className="gm-btn primary"
-                type="submit"
-                disabled={building || !prompt.trim() || backend !== "LIVE"}
-              >
-                {building ? "Generating…" : "✦ Generate guidance"}
-              </button>
-            </div>
-          </form>
-
-          <div className="gm-suggestions">
-            {[
-              "Create a browser game using React",
-              "Design a Three.js 3D scene",
-              "Build a business analytics dashboard",
-              "Create an Android app plan",
-              "Audit my existing React project",
-              "Write tests for the AI backend",
-            ].map((item) => (
-              <button
-                className="gm-chip"
-                key={item}
-                onClick={() => setPrompt(item)}
-              >
-                {item}
-              </button>
-            ))}
-          </div>
-        </section>
-
-        {buildError && (
-          <div
-            className="gm-notice danger"
-            style={{ marginTop: 15 }}
-            role="alert"
-          >
-            {buildError}
-          </div>
-        )}
-
-        {generated && (
-          <section className="gm-output">
-            <div className="gm-output-head">
-              <div>
-                <strong>AI RESPONSE</strong>
-                <div className="gm-muted gm-small">
-                  Generated guidance · Not proof of file creation
-                </div>
-              </div>
-              <button className="gm-btn" onClick={copyGenerated}>
-                {copied ? "Copied ✓" : "Copy"}
-              </button>
-            </div>
-
-            <pre>{generated}</pre>
-          </section>
-        )}
-
-        <div className="gm-notice" style={{ marginTop: 18 }}>
-          <strong>Important:</strong> This interface requests AI-generated
-          guidance from the configured backend. It does not independently create
-          project files, run commands, or deploy applications.
-        </div>
-      </>
-    );
-  }
-
-  function renderAgents() {
-    return (
-      <>
-        <section className="gm-welcome">
-          <div>
-            <div className="gm-kicker">Multi-Agent Architecture</div>
-            <h1 className="gm-h1">
-              AI <span className="gm-gradient">Agent Center</span>
-            </h1>
-            <p className="gm-muted" style={{ margin: 0 }}>
-              20 planned specialist modules under one central coordinator.
-            </p>
-          </div>
-        </section>
-
-        <div className="gm-notice" style={{ marginBottom: 16 }}>
-          <strong>Status policy:</strong> These are module definitions, not
-          proof of 20 operational AI agents. An agent becomes operational only
-          after its execution workflow and tests are verified.
-        </div>
-
-        <div className="gm-grid gm-agent-grid">
-          {AGENTS.map(([name, description, code], index) => (
-            <article className="gm-agent" key={code}>
-              <div className="gm-agent-top">
-                <span className="gm-agent-icon">
-                  {index === 19 ? "✦" : "⬡"}
-                </span>
-                <StatusPill>PLANNED</StatusPill>
-              </div>
-              <h3>{name}</h3>
-              <p>{description}</p>
-              <div className="gm-divider" />
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <span className="gm-muted gm-small">{code}</span>
-                <span className="gm-muted gm-small">Not verified</span>
-              </div>
-            </article>
-          ))}
-        </div>
-      </>
-    );
-  }
-
-  function renderRoadmap() {
-    return (
-      <>
-        <section className="gm-welcome">
-          <div>
-            <div className="gm-kicker">Engineering Execution Plan</div>
-            <h1 className="gm-h1">
-              100-Step <span className="gm-gradient">Roadmap</span>
-            </h1>
-            <p className="gm-muted" style={{ margin: 0 }}>
-              Apne project progress ko track karein. Completion manually
-              recorded hoti hai.
-            </p>
-          </div>
-
-          <button className="gm-btn" onClick={() => setCompletedSteps([])}>
-            Reset tracking
-          </button>
-        </section>
-
-        <div className="gm-card" style={{ marginBottom: 16 }}>
           <div
             style={{
               display: "flex",
-              justifyContent: "space-between",
-              gap: 12,
-              marginBottom: 12,
+              gap: 13,
+              alignItems: "center",
+              marginBottom: 18,
             }}
           >
-            <strong>Tracked completion</strong>
-            <strong className="gm-gradient">{completedCount}/100</strong>
+            <div className="gm-stat-icon" style={{ width: 45, height: 45 }}>
+              ◈
+            </div>
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 13 }}>
+                {completedCount === 100
+                  ? "All roadmap steps marked complete"
+                  : `Step ${currentStep} — ${ROADMAP[currentStep - 1]}`}
+              </div>
+              <div className="gm-muted gm-small">
+                Actual project health must be checked independently.
+              </div>
+            </div>
           </div>
+
           <div className="gm-progress">
             <div
               className="gm-progress-fill"
               style={{ width: `${completedCount}%` }}
             />
           </div>
-          <p className="gm-muted gm-small" style={{ marginBottom: 0 }}>
-            Checking a box updates this browser's roadmap tracker; it does not
-            run tests.
-          </p>
-        </div>
 
-        {PHASES.map(([letter, title, start, end]) => {
-          const phaseSteps = ROADMAP.slice(start - 1, end);
-          const phaseDone = phaseSteps.filter((_, i) =>
-            completedSteps.includes(start + i),
-          ).length;
-          const open = expandedPhases.includes(letter);
-
-          return (
-            <section className="gm-roadmap-phase" key={letter}>
-              <button
-                className="gm-phase-head"
-                onClick={() => togglePhase(letter)}
-                aria-expanded={open}
-              >
-                <span className="gm-phase-letter">{letter}</span>
-                <span className="gm-phase-main">
-                  <strong>{title}</strong>
-                  <span>
-                    Steps {start}–{end} · {phaseDone}/10 tracked complete
-                  </span>
-                </span>
-                <span className="gm-muted">{open ? "−" : "+"}</span>
-              </button>
-
-              {open && (
-                <div className="gm-phase-body">
-                  {phaseSteps.map((step, index) => {
-                    const number = start + index;
-                    const checked = completedSteps.includes(number);
-
-                    return (
-                      <label className="gm-step" key={number}>
-                        <span className="gm-step-num">
-                          {String(number).padStart(2, "0")}
-                        </span>
-                        <span
-                          className="gm-step-title"
-                          style={
-                            checked ? { color: "var(--green)" } : undefined
-                          }
-                        >
-                          {step}
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleStep(number)}
-                          aria-label={`Mark roadmap step ${number}: ${step}`}
-                        />
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          );
-        })}
-      </>
-    );
-  }
-
-  function renderProjects() {
-    return (
-      <>
-        <section className="gm-welcome">
-          <div>
-            <div className="gm-kicker">Project Operations</div>
-            <h1 className="gm-h1">
-              Projects <span className="gm-gradient">& Tasks</span>
-            </h1>
-            <p className="gm-muted" style={{ margin: 0 }}>
-              Create tasks and track their completion in this browser.
-            </p>
-          </div>
-
-          <button className="gm-btn" onClick={downloadData}>
-            ↓ Export data
-          </button>
-        </section>
-
-        <section className="gm-card">
-          <SectionHeader
-            title="Create a Task"
-            subtitle="Tasks are stored locally in this browser."
-          />
-
-          <form
-            onSubmit={addTask}
-            style={{ display: "flex", gap: 10, flexWrap: "wrap" }}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginTop: 8,
+            }}
           >
-            <input
-              className="gm-field"
-              style={{ flex: "1 1 230px" }}
-              value={taskInput}
-              onChange={(event) => setTaskInput(event.target.value)}
-              placeholder="Example: Verify Grandmaster AI chat..."
-              aria-label="New task title"
-              maxLength={250}
-            />
-            <button
-              className="gm-btn primary"
-              type="submit"
-              disabled={!taskInput.trim()}
-            >
-              + Add task
-            </button>
-          </form>
+            <span className="gm-muted gm-small">Tracked progress</span>
+            <strong className="gm-small">{completedCount}%</strong>
+          </div>
 
           <div className="gm-divider" />
 
-          <SectionHeader
-            title="Task List"
-            subtitle={`${finishedTasks} completed of ${taskCount} total tasks`}
-          />
-
-          {tasks.length === 0 ? (
-            <EmptyState>No tasks yet. Add your first mission above.</EmptyState>
-          ) : (
-            tasks.map((task) => (
-              <div
-                className={`gm-task ${task.done ? "done" : ""}`}
-                key={task.id}
-              >
-                <input
-                  type="checkbox"
-                  checked={task.done}
-                  onChange={() => toggleTask(task.id)}
-                  aria-label={`Mark ${task.title} complete`}
-                />
-                <div className="gm-task-text">{task.title}</div>
-                <button
-                  className="gm-btn ghost danger"
-                  onClick={() => deleteTask(task.id)}
-                >
-                  Delete
-                </button>
-              </div>
-            ))
-          )}
-        </section>
-
-        <div className="gm-notice" style={{ marginTop: 15 }}>
-          Local storage is not a cloud database. Tasks may not appear on another
-          device or browser. Use export to keep a copy of the current records.
-        </div>
-      </>
-    );
-  }
-
-  function renderBusiness() {
-    return (
-      <>
-        <section className="gm-welcome">
-          <div>
-            <div className="gm-kicker">Business & Productivity</div>
-            <h1 className="gm-h1">
-              Business <span className="gm-gradient">Center</span>
-            </h1>
-            <p className="gm-muted" style={{ margin: 0 }}>
-              Manage business planning, content, learning and operational
-              priorities.
-            </p>
+          <div className="gm-notice">
+            <strong>Important:</strong> Roadmap checkboxes record your local
+            progress. They do not automatically inspect or verify source code.
           </div>
         </section>
-
-        <div className="gm-grid gm-agent-grid">
-          {[
-            [
-              "↗",
-              "Business Planning",
-              "Create business plans, research markets and prioritize ideas.",
-              "assistant",
-              "AI assistance",
-            ],
-            [
-              "▤",
-              "Learning Center",
-              "Organize learning goals and practical lessons.",
-              "projects",
-              "Task tracking",
-            ],
-            [
-              "✎",
-              "Content Studio",
-              "Generate drafts, scripts and content calendars.",
-              "assistant",
-              "AI assistance",
-            ],
-            [
-              "▣",
-              "Project Management",
-              "Record tasks, milestones and progress.",
-              "projects",
-              "Available locally",
-            ],
-            [
-              "◈",
-              "Analytics Planning",
-              "Design metrics and reporting requirements.",
-              "assistant",
-              "AI assistance",
-            ],
-            [
-              "⬡",
-              "Automation Planning",
-              "Design workflows before enabling external actions.",
-              "integrations",
-              "Connection required",
-            ],
-          ].map(([icon, title, description, target, status]) => (
-            <article className="gm-agent" key={title}>
-              <div className="gm-agent-top">
-                <span className="gm-agent-icon">{icon}</span>
-                <StatusPill>{status}</StatusPill>
-              </div>
-              <h3>{title}</h3>
-              <p>{description}</p>
-              <button className="gm-btn" onClick={() => navigate(target)}>
-                Open workspace →
-              </button>
-            </article>
-          ))}
-        </div>
-      </>
-    );
-  }
-
-  function renderIntegrations() {
-    const integrations = [
-      [
-        "AI Provider",
-        "Server-side AI connection",
-        "Backend health can be checked; provider functionality needs a chat test.",
-      ],
-      [
-        "Database",
-        "Persistent project storage",
-        "No database connection is verified by this dashboard.",
-      ],
-      [
-        "Social Media",
-        "Authorized content publishing and analytics",
-        "Official APIs, account permissions and approval workflows required.",
-      ],
-      [
-        "Binance",
-        "Read-only market research",
-        "Live data connection is not configured by this dashboard.",
-      ],
-      [
-        "MT5 / Exness",
-        "Read-only trading monitoring",
-        "Broker connectivity must be implemented and verified separately.",
-      ],
-      [
-        "Automation",
-        "Approved scheduled workflows",
-        "Automation engine and permissions are not verified.",
-      ],
-      [
-        "Deployment",
-        "Production hosting",
-        "A successful local build does not prove production health.",
-      ],
-    ];
-
-    return (
-      <>
-        <section className="gm-welcome">
-          <div>
-            <div className="gm-kicker">External Services</div>
-            <h1 className="gm-h1">
-              System <span className="gm-gradient">Integrations</span>
-            </h1>
-            <p className="gm-muted" style={{ margin: 0 }}>
-              Review requirements before connecting external accounts or
-              services.
-            </p>
-          </div>
-        </section>
-
-        <div className="gm-notice" style={{ marginBottom: 16 }}>
-          No integration is marked CONNECTED unless its connection has been
-          verified. This dashboard does not request your passwords or expose API
-          keys.
-        </div>
-
-        <section className="gm-card">
-          <div className="gm-list">
-            {integrations.map(([name, subtitle, description]) => (
-              <div className="gm-list-row" key={name}>
-                <span className="gm-row-icon">⌘</span>
-                <div className="gm-row-main">
-                  <div className="gm-row-title">{name}</div>
-                  <div className="gm-row-sub">{subtitle}</div>
-                  <div className="gm-muted gm-small" style={{ marginTop: 6 }}>
-                    {description}
-                  </div>
-                </div>
-                <StatusPill>UNVERIFIED</StatusPill>
-              </div>
-            ))}
-          </div>
-        </section>
-      </>
-    );
-  }
-
-  function renderSecurity() {
-    const controls = [
-      ["Real trading", "LOCKED", "This UI does not submit live trades."],
-      [
-        "Money movement",
-        "DISABLED",
-        "No money transfer functionality is implemented here.",
-      ],
-      [
-        "API credentials",
-        "SERVER-SIDE ONLY",
-        "Never place private API keys in React source code.",
-      ],
-      [
-        "Social publishing",
-        "APPROVAL REQUIRED",
-        "Verify account permissions and review external actions.",
-      ],
-      [
-        "AI provider",
-        backend === "LIVE" ? "BACKEND REACHABLE" : "UNAVAILABLE",
-        "A health response does not guarantee successful model inference.",
-      ],
-      [
-        "Project storage",
-        "BROWSER LOCAL",
-        "Tasks and roadmap tracking use localStorage, not cloud storage.",
-      ],
-      [
-        "Deployment",
-        "NOT VERIFIED",
-        "Production status requires a separate deployed-site check.",
-      ],
-    ];
-
-    return (
-      <>
-        <section className="gm-welcome">
-          <div>
-            <div className="gm-kicker">Security & Operational Controls</div>
-            <h1 className="gm-h1">
-              Safety <span className="gm-gradient">Center</span>
-            </h1>
-            <p className="gm-muted" style={{ margin: 0 }}>
-              Honest status reporting, credential safety and external-action
-              boundaries.
-            </p>
-          </div>
-        </section>
-
-        <div className="gm-notice danger" style={{ marginBottom: 16 }}>
-          <strong>Safety rule:</strong> Do not put private API keys, passwords,
-          broker credentials or financial account secrets in frontend code. Use
-          server-side environment variables and appropriate access controls.
-        </div>
 
         <section className="gm-card">
           <SectionHeader
-            title="Operational Controls"
-            subtitle="Status shown by this interface"
-          />
-
-          <div className="gm-list">
-            {controls.map(([name, status, description]) => (
-              <div className="gm-list-row" key={name}>
-                <span className="gm-row-icon">⬢</span>
-                <div className="gm-row-main">
-                  <div className="gm-row-title">{name}</div>
-                  <div className="gm-row-sub">{description}</div>
-                </div>
-                <StatusPill
-                  type={
-                    status === "LOCKED" || status === "DISABLED" ? "green" : ""
-                  }
-                >
-                  {status}
-                </StatusPill>
-              </div>
-            ))}
-          </div>
-        </section>
-      </>
-    );
-  }
-
-  const pageTitles = {
-    overview: "Command Center",
-    assistant: "Grandmaster AI",
-    builder: "App Builder",
-    agents: "AI Agent Center",
-    roadmap: "100-Step Roadmap",
-    projects: "Projects & Tasks",
-    business: "Business Center",
-    integrations: "Integrations",
-    security: "Security Center",
-  };
-
-  const renderers = {
-    overview: renderOverview,
-    assistant: renderAssistant,
-    builder: renderBuilder,
-    agents: renderAgents,
-    roadmap: renderRoadmap,
-    projects: renderProjects,
-    business: renderBusiness,
-    integrations: renderIntegrations,
-    security: renderSecurity,
-  };
-
-  return (
-    <div className="gm">
-      <style>{css}</style>
-
-      {menuOpen && (
-        <button
-          aria-label="Close navigation"
-          onClick={() => setMenuOpen(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 25,
-            border: 0,
-            background: "#0009",
-          }}
-        />
-      )}
-
-      <div className="gm-layout">
-        <aside className={`gm-sidebar ${menuOpen ? "open" : ""}`}>
-          <div className="gm-brand">
-            <div className="gm-logo" aria-hidden="true">
-              G
-            </div>
-            <div>
-              <div className="gm-brand-name">Grandmaster</div>
-              <div className="gm-brand-sub">DIGITAL HUB</div>
-            </div>
-          </div>
-
-          <div className="gm-section-label">COMMAND</div>
-
-          <nav className="gm-nav" aria-label="Main navigation">
-            {NAVIGATION.map((item) => (
+            title="System Health"
+            subtitle="Live backend connectivity check"
+            action={
               <button
-                key={item.id}
-                className={page === item.id ? "active" : ""}
-                onClick={() => navigate(item.id)}
-                aria-current={page === item.id ? "page" : undefined}
-              >
-                <span className="gm-nav-icon">{item.icon}</span>
-                <span>{item.label}</span>
-              </button>
-            ))}
-          </nav>
-
-          <div className="gm-sidebar-bottom">
-            <div className="gm-safety-mini">
-              <div className="gm-safety-title">
-                <span>●</span> SAFETY CONTROLS
-              </div>
-              <p>
-                Trading locked by default.
-                <br />
-                Money movement disabled.
-                <br />
-                External actions require approval.
-              </p>
-            </div>
-
-            <div
-              className="gm-muted gm-small"
-              style={{ padding: "15px 7px 0" }}
-            >
-              Grandmaster Digital Hub
-              <br />
-              TAJ Edition · 2026
-            </div>
-          </div>
-        </aside>
-
-        <div className="gm-main">
-          <header className="gm-topbar">
-            <div className="gm-top-left">
-              <button
-                className="gm-icon-btn gm-menu-toggle"
-                onClick={() => setMenuOpen((value) => !value)}
-                aria-label="Toggle navigation"
-                aria-expanded={menuOpen}
-              >
-                ☰
-              </button>
-
-              <div>
-                <div className="gm-eyebrow">Grandmaster HQ / Workspace</div>
-                <div className="gm-page-title">{pageTitles[page]}</div>
-              </div>
-            </div>
-
-            <div className="gm-top-right">
-              <div
-                className={`gm-status ${backend === "LIVE" ? "live" : backend === "OFF" ? "off" : ""}`}
-                role="status"
-              >
-                <span className="gm-dot" />
-                <span className="gm-status-label">
-                  {backend === "LIVE"
-                    ? "Backend live"
-                    : backend === "OFF"
-                      ? "Backend offline"
-                      : "Connecting"}
-                </span>
-              </div>
-
-              <button
-                className="gm-icon-btn"
+                className="gm-btn ghost"
                 onClick={checkHealth}
                 disabled={refreshing}
-                title="Refresh backend status"
-                aria-label="Refresh backend status"
               >
-                {refreshing ? "…" : "↻"}
+                {refreshing ? "Checking…" : "↻ Refresh"}
               </button>
+            }
+          />
+
+          <div className="gm-list">
+            <div className="gm-list-row">
+              <span className="gm-row-icon">⌘</span>
+              <div className="gm-row-main">
+                <div className="gm-row-title">Backend API</div>
+                <div className="gm-row-sub">/api/health</div>
+              </div>
+              <StatusPill
+                type={
+                  backend === "LIVE" ? "green" : backend === "OFF" ? "red" : ""
+                }
+              >
+                {backend}
+              </StatusPill>
             </div>
-          </header>
 
-          <main className="gm-content">
-            {renderers[page]?.() || renderOverview()}
+            <div className="gm-list-row">
+              <span className="gm-row-icon">✦</span>
+              <div className="gm-row-main">
+                <div className="gm-row-title">AI Provider</div>
+                <div className="gm-row-sub">{model}</div>
+              </div>
+              <StatusPill type={backend === "LIVE" ? "green" : ""}>
+                {backend === "LIVE" ? "API REACHABLE" : "UNVERIFIED"}
+              </StatusPill>
+            </div>
 
-            <footer className="gm-footer">
-              GRANDMASTER DIGITAL HUB · LEARN · BUILD · EARN
-              <br />
-              UI status is not proof of backend, agent, integration or
-              production functionality.
-            </footer>
-          </main>
-        </div>
+            <div className="gm-list-row">
+              <span className="gm-row-icon">⬢</span>
+              <div className="gm-row-main">
+                <div className="gm-row-title">Trading Safety</div>
+                <div className="gm-row-sub">
+                  No live trading initiated by this dashboard
+                </div>
+              </div>
+              <StatusPill type="green">LOCKED</StatusPill>
+            </div>
+          </div>
+
+          {healthError && (
+            <p className="gm-muted gm-small" style={{ marginTop: 12 }}>
+              {healthError}
+            </p>
+          )}
+        </section>
       </div>
 
-      {toast && (
-        <div className="gm-toast" role="status">
-          {toast}
+      <section className="gm-card" style={{ marginBottom: 20 }}>
+        <SectionHeader
+          title="Quick Actions"
+          subtitle="Open a workspace to continue your mission"
+        />
+
+        <div className="gm-quick-grid">
+          {[
+            ["✦", "AI Assistant", "Ask questions or plan work", "assistant"],
+            ["⌘", "App Builder", "Generate implementation guidance", "builder"],
+            ["⬡", "Agent Center", "Review the 20 defined modules", "agents"],
+            ["▤", "Roadmap", "Track your 100 development steps", "roadmap"],
+            ["▣", "Tasks", "Manage projects and action items", "projects"],
+            ["⬢", "Security", "Review operational safety controls", "security"],
+          ].map(([icon, title, desc, target]) => (
+            <button
+              className="gm-quick"
+              key={target}
+              onClick={() => navigate(target)}
+            >
+              <div className="gm-quick-icon">{icon}</div>
+              <div className="gm-quick-title">{title}</div>
+              <div className="gm-quick-desc">{desc}</div>
+            </button>
+          ))}
         </div>
-      )}
-    </div>
+      </section>
+
+      <section className="gm-card">
+        <SectionHeader
+          title="Recent Activity"
+          subtitle="Actions recorded by this dashboard"
+        />
+
+        {activity.length === 0 ? (
+          <EmptyState>
+            No activity recorded yet. Start a task or update a roadmap step.
+          </EmptyState>
+        ) : (
+          <div className="gm-list">
+            {activity.slice(0, 5).map((item) => (
+              <div className="gm-list-row" key={item.id}>
+                <span className="gm-row-icon">↗</span>
+                <div className="gm-row-main">
+                  <div className="gm-row-title">{item.message}</div>
+                  <div className="gm-row-sub">{item.time}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </>
   );
 }
+
+function renderAssistant() {
+  return (
+    <>
+      <section className="gm-welcome">
+        <div>
+          <div className="gm-kicker">AI Brain · Conversation Workspace</div>
+          <h1 className="gm-h1">
+            Grandmaster <span className="gm-gradient">AI</span>
+          </h1>
+          <p className="gm-muted" style={{ margin: 0 }}>
+            Coding, business, learning, planning aur project assistance.
+          </p>
+        </div>
+
+        <button className="gm-btn" onClick={clearChat}>
+          ＋ New chat
+        </button>
+      </section>
+
+      <div className="gm-notice" style={{ marginBottom: 15 }}>
+        AI responses require a working backend and configured provider.
+        Conversation history currently remains in this browser session. Voice:
+        mic Chrome/Edge mein chalta hai.
+      </div>
+
+      <section className="gm-chat">
+        <div className="gm-output-head">
+          <div>
+            <strong>GRANDMASTER AI</strong>
+            <div className="gm-muted gm-small">{model}</div>
+          </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
+              justifyContent: "flex-end",
+            }}
+          >
+            {voice.speaking && (
+              <button
+                className="gm-btn"
+                type="button"
+                onClick={voice.stopSpeaking}
+              >
+                ⏹ Stop voice
+              </button>
+            )}
+            <button
+              className="gm-btn"
+              type="button"
+              onClick={() => voice.setAutoSpeak(!voice.autoSpeak)}
+              disabled={!voice.ttsSupported}
+              title="Agent ke reply khud bole"
+            >
+              {voice.autoSpeak ? "🔊 Auto: ON" : "🔇 Auto: OFF"}
+            </button>
+            <StatusPill type={backend === "LIVE" ? "green" : "red"}>
+              {backend === "LIVE" ? "CONNECTED" : "UNAVAILABLE"}
+            </StatusPill>
+          </div>
+        </div>
+
+        <div className="gm-messages">
+          {history.map((message, index) => (
+            <div
+              className={`gm-message ${message.role === "user" ? "user" : "ai"}`}
+              key={index}
+            >
+              {message.text}
+              {message.role !== "user" && voice.ttsSupported && (
+                <div style={{ marginTop: 6 }}>
+                  <button
+                    className="gm-btn ghost"
+                    type="button"
+                    style={{ padding: "4px 8px" }}
+                    onClick={() => voice.speak(message.text)}
+                    aria-label="Read this reply aloud"
+                  >
+                    🔊
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+
+          {sending && (
+            <div className="gm-message ai" role="status">
+              Grandmaster is thinking…
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
+        </div>
+
+        {chatError && (
+          <div className="gm-notice danger" style={{ margin: 12 }}>
+            {chatError}
+          </div>
+        )}
+
+        {voice.listening && (
+          <div className="gm-notice" style={{ margin: "0 12px 8px" }}>
+            🎤 {voice.interim || "Sun raha hoon… boliye"}
+          </div>
+        )}
+
+        <form className="gm-chat-form" onSubmit={sendChat}>
+          <button
+            type="button"
+            className={`gm-btn ${voice.listening ? "listening" : ""}`}
+            onClick={() =>
+              voice.listening
+                ? voice.stopListening()
+                : voice.startListening((text) =>
+                    setChatInput((prev) => (prev ? `${prev} ` : "") + text),
+                  )
+            }
+            disabled={!voice.sttSupported}
+            aria-label={voice.listening ? "Stop voice input" : "Voice input"}
+            title={
+              voice.sttSupported
+                ? "Bol kar likhein"
+                : "Is browser mein mic support nahi (Chrome/Edge use karein)"
+            }
+          >
+            {voice.listening ? "⏹" : "🎤"}
+          </button>
+          <AttachButton onPick={att.add} />
+          <textarea
+            className="gm-field"
+            value={chatInput}
+            onChange={(event) => setChatInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                sendChat();
+              }
+            }}
+            placeholder="Grandmaster ko apna command dein…"
+            aria-label="Message Grandmaster AI"
+          />
+
+          <button
+            className="gm-btn primary"
+            type="submit"
+            disabled={sending || backend !== "LIVE" || !chatInput.trim()}
+          >
+            {sending ? "…" : "➤ Send"}
+          </button>
+        </form>
+      </section>
+    </>
+  );
+}
+function renderBuilder() {
+  return (
+    <>
+      <section className="gm-welcome">
+        <div>
+          <div className="gm-kicker">Software Engineering Workspace</div>
+          <h1 className="gm-h1">
+            AI <span className="gm-gradient">App Builder</span>
+          </h1>
+          <p className="gm-muted" style={{ margin: 0 }}>
+            Apna idea describe karein aur implementation guidance hasil karein.
+          </p>
+        </div>
+      </section>
+
+      <section className="gm-builder">
+        <div className="gm-card-head">
+          <div>
+            <h2>What do you want to build?</h2>
+            <p>Describe the app, features, technology and expected behavior.</p>
+          </div>
+          <span className="gm-stat-icon">⌘</span>
+        </div>
+
+        <form
+          className="gm-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            handleBuild();
+          }}
+        >
+          <textarea
+            ref={promptRef}
+            className="gm-field gm-textarea"
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            placeholder="Example: Improve Grandmaster's React dashboard, preserve existing routes, connect the AI backend securely, add tests, and explain every changed file…"
+            aria-label="Application requirements"
+          />
+
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 12,
+              flexWrap: "wrap",
+            }}
+          >
+            <span className="gm-muted gm-small">
+              {backend === "LIVE"
+                ? "Backend reachable"
+                : "Backend connection required"}
+            </span>
+
+            <button
+              className="gm-btn primary"
+              type="submit"
+              disabled={building || !prompt.trim() || backend !== "LIVE"}
+            >
+              {building ? "Generating…" : "✦ Generate guidance"}
+            </button>
+          </div>
+        </form>
+
+        <div className="gm-suggestions">
+          {[
+            "Create a browser game using React",
+            "Design a Three.js 3D scene",
+            "Build a business analytics dashboard",
+            "Create an Android app plan",
+            "Audit my existing React project",
+            "Write tests for the AI backend",
+          ].map((item) => (
+            <button
+              className="gm-chip"
+              key={item}
+              onClick={() => setPrompt(item)}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {buildError && (
+        <div
+          className="gm-notice danger"
+          style={{ marginTop: 15 }}
+          role="alert"
+        >
+          {buildError}
+        </div>
+      )}
+
+      {generated && (
+        <section className="gm-output">
+          <div className="gm-output-head">
+            <div>
+              <strong>AI RESPONSE</strong>
+              <div className="gm-muted gm-small">
+                Generated guidance · Not proof of file creation
+              </div>
+            </div>
+            <button className="gm-btn" onClick={copyGenerated}>
+              {copied ? "Copied ✓" : "Copy"}
+            </button>
+          </div>
+
+          <pre>{generated}</pre>
+        </section>
+      )}
+
+      <div className="gm-notice" style={{ marginTop: 18 }}>
+        <strong>Important:</strong> This interface requests AI-generated
+        guidance from the configured backend. It does not independently create
+        project files, run commands, or deploy applications.
+      </div>
+    </>
+  );
+}
+
+function renderAgents() {
+  return (
+    <>
+      <section className="gm-welcome">
+        <div>
+          <div className="gm-kicker">Multi-Agent Architecture</div>
+          <h1 className="gm-h1">
+            AI <span className="gm-gradient">Agent Center</span>
+          </h1>
+          <p className="gm-muted" style={{ margin: 0 }}>
+            20 planned specialist modules under one central coordinator.
+          </p>
+        </div>
+      </section>
+
+      <div className="gm-notice" style={{ marginBottom: 16 }}>
+        <strong>Status policy:</strong> These are module definitions, not proof
+        of 20 operational AI agents. An agent becomes operational only after its
+        execution workflow and tests are verified.
+      </div>
+
+      <div className="gm-grid gm-agent-grid">
+        {AGENTS.map(([name, description, code], index) => (
+          <article className="gm-agent" key={code}>
+            <div className="gm-agent-top">
+              <span className="gm-agent-icon">{index === 19 ? "✦" : "⬡"}</span>
+              <StatusPill>PLANNED</StatusPill>
+            </div>
+            <h3>{name}</h3>
+            <p>{description}</p>
+            <div className="gm-divider" />
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <span className="gm-muted gm-small">{code}</span>
+              <span className="gm-muted gm-small">Not verified</span>
+            </div>
+          </article>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function renderRoadmap() {
+  return (
+    <>
+      <section className="gm-welcome">
+        <div>
+          <div className="gm-kicker">Engineering Execution Plan</div>
+          <h1 className="gm-h1">
+            100-Step <span className="gm-gradient">Roadmap</span>
+          </h1>
+          <p className="gm-muted" style={{ margin: 0 }}>
+            Apne project progress ko track karein. Completion manually recorded
+            hoti hai.
+          </p>
+        </div>
+
+        <button className="gm-btn" onClick={() => setCompletedSteps([])}>
+          Reset tracking
+        </button>
+      </section>
+
+      <div className="gm-card" style={{ marginBottom: 16 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 12,
+            marginBottom: 12,
+          }}
+        >
+          <strong>Tracked completion</strong>
+          <strong className="gm-gradient">{completedCount}/100</strong>
+        </div>
+        <div className="gm-progress">
+          <div
+            className="gm-progress-fill"
+            style={{ width: `${completedCount}%` }}
+          />
+        </div>
+        <p className="gm-muted gm-small" style={{ marginBottom: 0 }}>
+          Checking a box updates this browser's roadmap tracker; it does not run
+          tests.
+        </p>
+      </div>
+
+      {PHASES.map(([letter, title, start, end]) => {
+        const phaseSteps = ROADMAP.slice(start - 1, end);
+        const phaseDone = phaseSteps.filter((_, i) =>
+          completedSteps.includes(start + i),
+        ).length;
+        const open = expandedPhases.includes(letter);
+
+        return (
+          <section className="gm-roadmap-phase" key={letter}>
+            <button
+              className="gm-phase-head"
+              onClick={() => togglePhase(letter)}
+              aria-expanded={open}
+            >
+              <span className="gm-phase-letter">{letter}</span>
+              <span className="gm-phase-main">
+                <strong>{title}</strong>
+                <span>
+                  Steps {start}–{end} · {phaseDone}/10 tracked complete
+                </span>
+              </span>
+              <span className="gm-muted">{open ? "−" : "+"}</span>
+            </button>
+
+            {open && (
+              <div className="gm-phase-body">
+                {phaseSteps.map((step, index) => {
+                  const number = start + index;
+                  const checked = completedSteps.includes(number);
+
+                  return (
+                    <label className="gm-step" key={number}>
+                      <span className="gm-step-num">
+                        {String(number).padStart(2, "0")}
+                      </span>
+                      <span
+                        className="gm-step-title"
+                        style={checked ? { color: "var(--green)" } : undefined}
+                      >
+                        {step}
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleStep(number)}
+                        aria-label={`Mark roadmap step ${number}: ${step}`}
+                      />
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        );
+      })}
+    </>
+  );
+}
+
+function renderProjects() {
+  return (
+    <>
+      <section className="gm-welcome">
+        <div>
+          <div className="gm-kicker">Project Operations</div>
+          <h1 className="gm-h1">
+            Projects <span className="gm-gradient">& Tasks</span>
+          </h1>
+          <p className="gm-muted" style={{ margin: 0 }}>
+            Create tasks and track their completion in this browser.
+          </p>
+        </div>
+
+        <button className="gm-btn" onClick={downloadData}>
+          ↓ Export data
+        </button>
+      </section>
+
+      <section className="gm-card">
+        <SectionHeader
+          title="Create a Task"
+          subtitle="Tasks are stored locally in this browser."
+        />
+
+        <form
+          onSubmit={addTask}
+          style={{ display: "flex", gap: 10, flexWrap: "wrap" }}
+        >
+          <input
+            className="gm-field"
+            style={{ flex: "1 1 230px" }}
+            value={taskInput}
+            onChange={(event) => setTaskInput(event.target.value)}
+            placeholder="Example: Verify Grandmaster AI chat..."
+            aria-label="New task title"
+            maxLength={250}
+          />
+          <button
+            className="gm-btn primary"
+            type="submit"
+            disabled={!taskInput.trim()}
+          >
+            + Add task
+          </button>
+        </form>
+
+        <div className="gm-divider" />
+
+        <SectionHeader
+          title="Task List"
+          subtitle={`${finishedTasks} completed of ${taskCount} total tasks`}
+        />
+
+        {tasks.length === 0 ? (
+          <EmptyState>No tasks yet. Add your first mission above.</EmptyState>
+        ) : (
+          tasks.map((task) => (
+            <div className={`gm-task ${task.done ? "done" : ""}`} key={task.id}>
+              <input
+                type="checkbox"
+                checked={task.done}
+                onChange={() => toggleTask(task.id)}
+                aria-label={`Mark ${task.title} complete`}
+              />
+              <div className="gm-task-text">{task.title}</div>
+              <button
+                className="gm-btn ghost danger"
+                onClick={() => deleteTask(task.id)}
+              >
+                Delete
+              </button>
+            </div>
+          ))
+        )}
+      </section>
+
+      <div className="gm-notice" style={{ marginTop: 15 }}>
+        Local storage is not a cloud database. Tasks may not appear on another
+        device or browser. Use export to keep a copy of the current records.
+      </div>
+    </>
+  );
+}
+
+function renderBusiness() {
+  return (
+    <>
+      <section className="gm-welcome">
+        <div>
+          <div className="gm-kicker">Business & Productivity</div>
+          <h1 className="gm-h1">
+            Business <span className="gm-gradient">Center</span>
+          </h1>
+          <p className="gm-muted" style={{ margin: 0 }}>
+            Manage business planning, content, learning and operational
+            priorities.
+          </p>
+        </div>
+      </section>
+
+      <div className="gm-grid gm-agent-grid">
+        {[
+          [
+            "↗",
+            "Business Planning",
+            "Create business plans, research markets and prioritize ideas.",
+            "assistant",
+            "AI assistance",
+          ],
+          [
+            "▤",
+            "Learning Center",
+            "Organize learning goals and practical lessons.",
+            "projects",
+            "Task tracking",
+          ],
+          [
+            "✎",
+            "Content Studio",
+            "Generate drafts, scripts and content calendars.",
+            "assistant",
+            "AI assistance",
+          ],
+          [
+            "▣",
+            "Project Management",
+            "Record tasks, milestones and progress.",
+            "projects",
+            "Available locally",
+          ],
+          [
+            "◈",
+            "Analytics Planning",
+            "Design metrics and reporting requirements.",
+            "assistant",
+            "AI assistance",
+          ],
+          [
+            "⬡",
+            "Automation Planning",
+            "Design workflows before enabling external actions.",
+            "integrations",
+            "Connection required",
+          ],
+        ].map(([icon, title, description, target, status]) => (
+          <article className="gm-agent" key={title}>
+            <div className="gm-agent-top">
+              <span className="gm-agent-icon">{icon}</span>
+              <StatusPill>{status}</StatusPill>
+            </div>
+            <h3>{title}</h3>
+            <p>{description}</p>
+            <button className="gm-btn" onClick={() => navigate(target)}>
+              Open workspace →
+            </button>
+          </article>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function renderIntegrations() {
+  const integrations = [
+    [
+      "AI Provider",
+      "Server-side AI connection",
+      "Backend health can be checked; provider functionality needs a chat test.",
+    ],
+    [
+      "Database",
+      "Persistent project storage",
+      "No database connection is verified by this dashboard.",
+    ],
+    [
+      "Social Media",
+      "Authorized content publishing and analytics",
+      "Official APIs, account permissions and approval workflows required.",
+    ],
+    [
+      "Binance",
+      "Read-only market research",
+      "Live data connection is not configured by this dashboard.",
+    ],
+    [
+      "MT5 / Exness",
+      "Read-only trading monitoring",
+      "Broker connectivity must be implemented and verified separately.",
+    ],
+    [
+      "Automation",
+      "Approved scheduled workflows",
+      "Automation engine and permissions are not verified.",
+    ],
+    [
+      "Deployment",
+      "Production hosting",
+      "A successful local build does not prove production health.",
+    ],
+  ];
+
+  return (
+    <>
+      <section className="gm-welcome">
+        <div>
+          <div className="gm-kicker">External Services</div>
+          <h1 className="gm-h1">
+            System <span className="gm-gradient">Integrations</span>
+          </h1>
+          <p className="gm-muted" style={{ margin: 0 }}>
+            Review requirements before connecting external accounts or services.
+          </p>
+        </div>
+      </section>
+
+      <div className="gm-notice" style={{ marginBottom: 16 }}>
+        No integration is marked CONNECTED unless its connection has been
+        verified. This dashboard does not request your passwords or expose API
+        keys.
+      </div>
+
+      <section className="gm-card">
+        <div className="gm-list">
+          {integrations.map(([name, subtitle, description]) => (
+            <div className="gm-list-row" key={name}>
+              <span className="gm-row-icon">⌘</span>
+              <div className="gm-row-main">
+                <div className="gm-row-title">{name}</div>
+                <div className="gm-row-sub">{subtitle}</div>
+                <div className="gm-muted gm-small" style={{ marginTop: 6 }}>
+                  {description}
+                </div>
+              </div>
+              <StatusPill>UNVERIFIED</StatusPill>
+            </div>
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function renderSecurity() {
+  const controls = [
+    ["Real trading", "LOCKED", "This UI does not submit live trades."],
+    [
+      "Money movement",
+      "DISABLED",
+      "No money transfer functionality is implemented here.",
+    ],
+    [
+      "API credentials",
+      "SERVER-SIDE ONLY",
+      "Never place private API keys in React source code.",
+    ],
+    [
+      "Social publishing",
+      "APPROVAL REQUIRED",
+      "Verify account permissions and review external actions.",
+    ],
+    [
+      "AI provider",
+      backend === "LIVE" ? "BACKEND REACHABLE" : "UNAVAILABLE",
+      "A health response does not guarantee successful model inference.",
+    ],
+    [
+      "Project storage",
+      "BROWSER LOCAL",
+      "Tasks and roadmap tracking use localStorage, not cloud storage.",
+    ],
+    [
+      "Deployment",
+      "NOT VERIFIED",
+      "Production status requires a separate deployed-site check.",
+    ],
+  ];
+
+  return (
+    <>
+      <section className="gm-welcome">
+        <div>
+          <div className="gm-kicker">Security & Operational Controls</div>
+          <h1 className="gm-h1">
+            Safety <span className="gm-gradient">Center</span>
+          </h1>
+          <p className="gm-muted" style={{ margin: 0 }}>
+            Honest status reporting, credential safety and external-action
+            boundaries.
+          </p>
+        </div>
+      </section>
+
+      <div className="gm-notice danger" style={{ marginBottom: 16 }}>
+        <strong>Safety rule:</strong> Do not put private API keys, passwords,
+        broker credentials or financial account secrets in frontend code. Use
+        server-side environment variables and appropriate access controls.
+      </div>
+
+      <section className="gm-card">
+        <SectionHeader
+          title="Operational Controls"
+          subtitle="Status shown by this interface"
+        />
+
+        <div className="gm-list">
+          {controls.map(([name, status, description]) => (
+            <div className="gm-list-row" key={name}>
+              <span className="gm-row-icon">⬢</span>
+              <div className="gm-row-main">
+                <div className="gm-row-title">{name}</div>
+                <div className="gm-row-sub">{description}</div>
+              </div>
+              <StatusPill
+                type={
+                  status === "LOCKED" || status === "DISABLED" ? "green" : ""
+                }
+              >
+                {status}
+              </StatusPill>
+            </div>
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+const pageTitles = {
+  overview: "Command Center",
+  assistant: "Grandmaster AI",
+  builder: "App Builder",
+  agents: "AI Agent Center",
+  roadmap: "100-Step Roadmap",
+  projects: "Projects & Tasks",
+  business: "Business Center",
+  integrations: "Integrations",
+  security: "Security Center",
+};
+
+const renderers = {
+  overview: renderOverview,
+  assistant: renderAssistant,
+  builder: renderBuilder,
+  agents: renderAgents,
+  roadmap: renderRoadmap,
+  projects: renderProjects,
+  business: renderBusiness,
+  integrations: renderIntegrations,
+  security: renderSecurity,
+};
+
+return (
+  <div className="gm">
+    <style>{css}</style>
+
+    {menuOpen && (
+      <button
+        aria-label="Close navigation"
+        onClick={() => setMenuOpen(false)}
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 25,
+          border: 0,
+          background: "#0009",
+        }}
+      />
+    )}
+
+    <div className="gm-layout">
+      <aside className={`gm-sidebar ${menuOpen ? "open" : ""}`}>
+        <div className="gm-brand">
+          <div className="gm-logo" aria-hidden="true">
+            G
+          </div>
+          <div>
+            <div className="gm-brand-name">Grandmaster</div>
+            <div className="gm-brand-sub">DIGITAL HUB</div>
+          </div>
+        </div>
+
+        <div className="gm-section-label">COMMAND</div>
+
+        <nav className="gm-nav" aria-label="Main navigation">
+          {NAVIGATION.map((item) => (
+            <button
+              key={item.id}
+              className={page === item.id ? "active" : ""}
+              onClick={() => navigate(item.id)}
+              aria-current={page === item.id ? "page" : undefined}
+            >
+              <span className="gm-nav-icon">{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="gm-sidebar-bottom">
+          <div className="gm-safety-mini">
+            <div className="gm-safety-title">
+              <span>●</span> SAFETY CONTROLS
+            </div>
+            <p>
+              Trading locked by default.
+              <br />
+              Money movement disabled.
+              <br />
+              External actions require approval.
+            </p>
+          </div>
+
+          <div className="gm-muted gm-small" style={{ padding: "15px 7px 0" }}>
+            Grandmaster Digital Hub
+            <br />
+            TAJ Edition · 2026
+          </div>
+        </div>
+      </aside>
+
+      <div className="gm-main">
+        <header className="gm-topbar">
+          <div className="gm-top-left">
+            <button
+              className="gm-icon-btn gm-menu-toggle"
+              onClick={() => setMenuOpen((value) => !value)}
+              aria-label="Toggle navigation"
+              aria-expanded={menuOpen}
+            >
+              ☰
+            </button>
+
+            <div>
+              <div className="gm-eyebrow">Grandmaster HQ / Workspace</div>
+              <div className="gm-page-title">{pageTitles[page]}</div>
+            </div>
+          </div>
+
+          <div className="gm-top-right">
+            <div
+              className={`gm-status ${backend === "LIVE" ? "live" : backend === "OFF" ? "off" : ""}`}
+              role="status"
+            >
+              <span className="gm-dot" />
+              <span className="gm-status-label">
+                {backend === "LIVE"
+                  ? "Backend live"
+                  : backend === "OFF"
+                    ? "Backend offline"
+                    : "Connecting"}
+              </span>
+            </div>
+
+            <button
+              className="gm-icon-btn"
+              onClick={checkHealth}
+              disabled={refreshing}
+              title="Refresh backend status"
+              aria-label="Refresh backend status"
+            >
+              {refreshing ? "…" : "↻"}
+            </button>
+          </div>
+        </header>
+
+        <main className="gm-content">
+          {renderers[page]?.() || renderOverview()}
+
+          <footer className="gm-footer">
+            GRANDMASTER DIGITAL HUB · LEARN · BUILD · EARN
+            <br />
+            UI status is not proof of backend health or deployment.
+          </footer>
+        </main>
+      </div>
+    </div>
+
+    {toast && (
+      <div className="gm-toast" role="status">
+        {toast}
+      </div>
+    )}
+  </div>
+);
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = () => reject(new Error("File read failed."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function askGrandmaster(message, history = [], files = []) {
+  const attachments = await Promise.all(
+    files.map(async (item) => {
+      const file = item.file || item; // useAttachments ke shape ke mutabiq
+      return {
+        name: file.name,
+        type: file.type,
+        data: await fileToBase64(file),
+      };
+    }),
+  );
+
+  const data = await apiRequest("/api/chat", {
+    method: "POST",
+    body: JSON.stringify({
+      message,
+      attachments,
+      history: history.slice(-12).map((item) => ({
+        role: item.role === "user" ? "user" : "assistant",
+        content: item.text,
+      })),
+    }),
+  });
+
+  const replyText =
+    typeof data.reply === "string"
+      ? data.reply
+      : typeof data.response === "string"
+        ? data.response
+        : typeof data.text === "string"
+          ? data.text
+          : "Grandmaster se jawab nahi aaya.";
+
+  return {
+    text: replyText,
+    model: data.model || data.primary || "gemini-3.8-flash",
+  };
+}
+
+function downloadData() {
+  const exportPayload = {
+    chatHistory: JSON.parse(localStorage.getItem("grandmaster_chat") || "[]"),
+    timestamp: new Date().toISOString(),
+  };
+  const blob = new Blob([JSON.stringify(exportPayload, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `grandmaster-data-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+``;

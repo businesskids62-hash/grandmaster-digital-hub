@@ -4,6 +4,9 @@
 //   gemini    - Google Gemini API (default, model: gemini-3.8-flash)
 //   anthropic - Anthropic Messages API
 //   openai    - any OpenAI-compatible Chat Completions API (OpenAI, OpenRouter, Groq, local servers...)
+//
+// Optional in server/.env:
+//   AI_FALLBACK_MODEL - model to try if the main model is overloaded (503/429/5xx)
 
 const SYSTEM_PROMPT =
   "You are Grandmaster AI, a helpful assistant for coding, business planning, learning and project management. " +
@@ -27,10 +30,11 @@ const DEFAULTS = {
 };
 
 export class AIError extends Error {
-  constructor(message, status = 502) {
+  constructor(message, status = 502, retryable = false) {
     super(message);
     this.name = "AIError";
     this.status = status;
+    this.retryable = retryable;
   }
 }
 
@@ -117,21 +121,24 @@ async function postJson(url, { headers, body, timeoutMs }) {
     if (!response.ok) {
       const detail =
         data?.error?.message || data?.message || `HTTP ${response.status}`;
+      // Temporary provider problems are worth retrying.
+      const retryable = [429, 500, 502, 503, 504].includes(response.status);
       const status =
-        response.status === 401 || response.status === 403
-          ? 502
-          : response.status === 429
-            ? 429
-            : 502;
-      throw new AIError(`AI provider error: ${detail}`, status);
+        response.status === 429 ? 429 : response.status === 503 ? 503 : 502;
+      throw new AIError(`AI provider error: ${detail}`, status, retryable);
     }
 
     return data;
   } catch (error) {
     if (error instanceof AIError) throw error;
+    // Timeouts are not retried (3 x 60s would be too long to wait).
     if (error.name === "AbortError")
       throw new AIError("AI provider request timed out.", 504);
-    throw new AIError(`Could not reach the AI provider: ${error.message}`, 502);
+    throw new AIError(
+      `Could not reach the AI provider: ${error.message}`,
+      502,
+      true,
+    );
   } finally {
     clearTimeout(timer);
   }
@@ -213,6 +220,22 @@ async function callOpenAI(config, messages) {
   return data?.choices?.[0]?.message?.content || "";
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Retries temporary errors with exponential backoff (~1s, 2s, 4s).
+async function callWithRetry(caller, config, messages, retries = 3) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await caller(config, messages);
+    } catch (error) {
+      const canRetry =
+        error instanceof AIError && error.retryable && attempt < retries;
+      if (!canRetry) throw error;
+      await sleep(1000 * 2 ** attempt + Math.random() * 300);
+    }
+  }
+}
+
 export async function generateReply(
   { message, history = [] },
   env = process.env,
@@ -229,7 +252,29 @@ export async function generateReply(
     anthropic: callAnthropic,
     openai: callOpenAI,
   };
-  const reply = await callers[config.provider](config, messages);
+  const caller = callers[config.provider];
+  const fallbackModel = (env.AI_FALLBACK_MODEL || "").trim();
+  let reply;
+
+  try {
+    reply = await callWithRetry(caller, config, messages);
+  } catch (error) {
+    const canFallback =
+      error instanceof AIError &&
+      error.retryable &&
+      fallbackModel &&
+      fallbackModel !== config.model;
+
+    if (!canFallback) throw error;
+
+    console.warn(`[ai] ${config.model} busy, falling back to ${fallbackModel}`);
+    reply = await callWithRetry(
+      caller,
+      { ...config, model: fallbackModel },
+      messages,
+      1,
+    );
+  }
 
   if (typeof reply !== "string" || !reply.trim()) {
     throw new AIError("AI provider returned an empty response.", 502);
