@@ -1710,6 +1710,9 @@ const renderers = {
   integrations: renderIntegrations,
   security: renderSecurity,
 };
+return (
+  <div className="gm" data-app="grandmaster-digital-hub">
+    <style>{css}</style>
 
 return (
   <div className="gm">
