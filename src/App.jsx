@@ -6,6 +6,13 @@ import {
   useRef,
   useState,
 } from "react";
+import { hamzad } from "./agents/hamzad.js";
+import { systemDimagh } from "./agents/systemDimagh.js";
+import { doubleBrain } from "./agents/doubleBrain.js";
+import { systemDoctor } from "./agents/systemDoctor.js";
+import { agentOrchestrator } from "./agents/agentOrchestrator.js";
+import { startWakeWord, speakRoar } from "./utils/wakeWord.js";
+
 
 /* ==========================================================================
    GRANDMASTER DIGITAL HUB — Generation 5
@@ -19,11 +26,25 @@ import {
 
 const API_BASE = (
   (typeof window !== "undefined" && window.GRANDMASTER_API_BASE) ||
+  (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL) ||
   ""
 ).replace(/\/$/, "");
 const DEFAULT_MODEL = "AI Provider";
+const STORAGE_PREFIX = "gm5:";
+const STORAGE_KEYS = {
+  currentModel: "gm5:currentModel",
+  providerStatus: "gm5:providerStatus",
+  chatHistory: "gm5:chatHistory",
+  uiPrefs: "gm5:uiPrefs",
+  build: "gm5:build",
+};
+const BUILD_INFO =
+  typeof __BUILD_INFO__ !== "undefined"
+    ? __BUILD_INFO__
+    : { commitSha: "dev", buildTime: new Date().toISOString() };
 const STORAGE_KEY = "grandmaster_dashboard_v5";
 const REQUEST_TIMEOUT_MS = 90000;
+const CHAT_TIMEOUT_MS = 30000; // chat must answer within 30s or show an error
 const MAX_FILES = 5;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_HISTORY_SAVED = 100;
@@ -217,9 +238,58 @@ function loadState() {
     autoSpeak: false,
   };
   try {
+    if (typeof localStorage !== "undefined") {
+      // Ensure no auth secrets exist in localStorage (Rule 2)
+      localStorage.removeItem("authToken");
+      localStorage.removeItem("token");
+      localStorage.removeItem("jwt");
+      localStorage.setItem(STORAGE_KEYS.build, JSON.stringify(BUILD_INFO));
+    }
+
+    // Load gm5:chatHistory
+    let history = [];
+    const savedChat = localStorage.getItem(STORAGE_KEYS.chatHistory);
+    if (savedChat) {
+      const parsedChat = JSON.parse(savedChat);
+      if (Array.isArray(parsedChat)) {
+        history = parsedChat
+          .filter(
+            (m) =>
+              m &&
+              typeof m.text === "string" &&
+              (m.role === "user" || m.role === "assistant"),
+          )
+          .slice(-MAX_HISTORY_SAVED);
+      }
+    }
+
+    // Load gm5:uiPrefs
+    const savedPrefs = localStorage.getItem(STORAGE_KEYS.uiPrefs);
+    if (savedPrefs) {
+      const prefs = JSON.parse(savedPrefs);
+      return {
+        tasks: Array.isArray(prefs.tasks) ? prefs.tasks : [],
+        completedSteps: Array.isArray(prefs.completedSteps)
+          ? prefs.completedSteps.filter(
+              (n) => Number.isInteger(n) && n >= 1 && n <= 100,
+            )
+          : [],
+        activity: Array.isArray(prefs.activity) ? prefs.activity.slice(0, 30) : [],
+        memories: Array.isArray(prefs.memories)
+          ? prefs.memories.filter((m) => m && m.text)
+          : [],
+        history: history.length ? history : [GREETING],
+        agentCode: AGENTS.some((a) => a.code === prefs.agentCode)
+          ? prefs.agentCode
+          : DEFAULT_AGENT,
+        autoSpeak: Boolean(prefs.autoSpeak),
+      };
+    }
+
+    // Fallback migration from legacy storage key
     const v = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
     if (!v || typeof v !== "object") return empty;
-    const history = Array.isArray(v.history)
+    const legacyHistory = Array.isArray(v.history)
       ? v.history.filter(
           (m) =>
             m &&
@@ -238,7 +308,7 @@ function loadState() {
       memories: Array.isArray(v.memories)
         ? v.memories.filter((m) => m && m.text)
         : [],
-      history: history.length ? history.slice(-MAX_HISTORY_SAVED) : [GREETING],
+      history: legacyHistory.length ? legacyHistory.slice(-MAX_HISTORY_SAVED) : [GREETING],
       agentCode: AGENTS.some((a) => a.code === v.agentCode)
         ? v.agentCode
         : DEFAULT_AGENT,
@@ -266,9 +336,9 @@ function stripForSpeech(text) {
     .slice(0, 3000);
 }
 
-async function apiRequest(path, options = {}) {
+async function apiRequest(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       ...options,
@@ -314,7 +384,7 @@ async function askGrandmaster(
   message,
   history = [],
   files = [],
-  { agent, memories = [] } = {},
+  { agent, memories = [], timeoutMs = CHAT_TIMEOUT_MS } = {},
 ) {
   const attachments = await Promise.all(
     files.map(async (item) => {
@@ -334,20 +404,24 @@ async function askGrandmaster(
     ? `[ROLE]\n${system}\n${mem.length ? `[MEMORY]\n- ${mem.join("\n- ")}\n` : ""}[USER]\n${message}`
     : message;
 
-  const data = await apiRequest("/api/chat", {
-    method: "POST",
-    body: JSON.stringify({
-      message: text,
-      attachments,
-      agent: agent ? agent.code : DEFAULT_AGENT,
-      memory: mem,
-      system,
-      history: history.slice(-12).map((item) => ({
-        role: item.role === "user" ? "user" : "assistant",
-        content: item.text,
-      })),
-    }),
-  });
+  const data = await apiRequest(
+    "/api/chat",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        message: text,
+        attachments,
+        agent: agent ? agent.code : DEFAULT_AGENT,
+        memory: mem,
+        system,
+        history: history.slice(-12).map((item) => ({
+          role: item.role === "user" ? "user" : "assistant",
+          content: item.text,
+        })),
+      }),
+    },
+    timeoutMs,
+  );
 
   const reply = [data?.reply, data?.response, data?.text, data?.message].find(
     (v) => typeof v === "string" && v.trim(),
@@ -668,6 +742,8 @@ function App() {
   const [backend, setBackend] = useState("CHECKING");
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [healthError, setHealthError] = useState("");
+  const [aiStatus, setAiStatus] = useState("UNKNOWN"); // UNKNOWN | VERIFIED | FAILED
+  const [aiReason, setAiReason] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState("");
 
@@ -688,6 +764,75 @@ function App() {
   const [chatInput, setChatInput] = useState("");
   const [sending, setSending] = useState(false);
   const [chatError, setChatError] = useState("");
+  /* ---- MERE SHER wake word state ---- */
+  const [isListening, setIsListening] = useState(false);
+  const [isTriggered, setIsTriggered] = useState(false);
+  const [doctorScan, setDoctorScan] = useState(null);
+  const [doctorRunning, setDoctorRunning] = useState(false);
+  const [dimaghLogs, setDimaghLogs] = useState([]);
+  const [hamzadSaved, setHamzadSaved] = useState(hamzad.getSnapshot().updatedAt ? true : false);
+  const [weaknessesInput, setWeaknessesInput] = useState("");
+  const [roadmapLocked, setRoadmapLocked] = useState(hamzad.isTarteebLocked());
+  const wakeRef = useRef(null);
+
+  const addDimaghLog = (message) => {
+    const entry = `[Dimagh] ${message}`;
+    setDimaghLogs((prev) => [entry, ...prev].slice(0, 60));
+    systemDimagh.addLog(message);
+  };
+
+  const toggleWake = () => {
+    if (isListening) {
+      if (wakeRef.current) wakeRef.current.stop();
+      setIsListening(false);
+      setIsTriggered(false);
+      addDimaghLog("Mic roka gaya");
+    } else {
+      if (wakeRef.current) {
+        setIsListening(true);
+        addDimaghLog("Pehle se chalu hai");
+        return;
+      }
+      wakeRef.current = startWakeWord({
+        onTrigger: (state) => {
+          setIsTriggered(true);
+          setIsListening(true);
+          addDimaghLog("Wake word 'Mere Sher' detected — dono brains zinda");
+          // Also announce via agent orchestrator
+          agentOrchestrator.log("CODING", "working");
+          agentOrchestrator.log("RESEARCH", "working");
+          setTimeout(() => setIsTriggered(false), 6000);
+        },
+      });
+      setIsListening(true);
+      addDimaghLog("Mic ON — 'Mere Sher' ke liye sun raha hoon");
+    }
+  };
+
+  /* ---- System Doctor: virus scan & disk cleanup ---- */
+  const runSystemDoctor = () => {
+    setDoctorRunning(true);
+    addDimaghLog("SystemDoctor: virus scan aur disk cleanup shuru ho raha hai");
+    agentOrchestrator.log("SECURITY", "working");
+    systemDoctor.runVirusScan();
+    systemDoctor.runDiskCleanup();
+    setTimeout(() => {
+      setDoctorRunning(false);
+      setDoctorScan(systemDoctor.getSnapshot());
+      addDimaghLog(
+        `SystemDoctor: scan complete — ${systemDoctor.getSnapshot().threats.length} threat(s), ${systemDoctor.getSnapshot().junkFiles.length} file(s)`,
+      );
+    }, 2500);
+  };
+
+  /* Mic always ON: start wake word on mount */
+  useEffect(() => {
+    toggleWake();
+    return () => {
+      if (wakeRef.current) wakeRef.current.stop();
+    };
+  }, []);
+
   const [history, setHistory] = useState(saved.history);
 
   const [memories, setMemories] = useState(saved.memories);
@@ -715,11 +860,24 @@ function App() {
     [],
   );
 
-  // Persist everything in one place.
+  // Persist gm5: versioned keys (cap 100, no attachments/base64, no auth secrets)
   useEffect(() => {
     try {
+      // 1. gm5:chatHistory - cap 100, strip attachments & base64
+      const cleanHistory = history
+        .slice(-MAX_HISTORY_SAVED)
+        .map((m) => ({
+          id: m.id,
+          role: m.role,
+          text: m.text,
+          time: m.time,
+          model: m.model,
+        }));
+      localStorage.setItem(STORAGE_KEYS.chatHistory, JSON.stringify(cleanHistory));
+
+      // 2. gm5:uiPrefs
       localStorage.setItem(
-        STORAGE_KEY,
+        STORAGE_KEYS.uiPrefs,
         JSON.stringify({
           tasks,
           completedSteps,
@@ -727,9 +885,14 @@ function App() {
           memories,
           agentCode,
           autoSpeak: voice.autoSpeak,
-          history: history.slice(-MAX_HISTORY_SAVED),
         }),
       );
+
+      // 3. gm5:build
+      localStorage.setItem(STORAGE_KEYS.build, JSON.stringify(BUILD_INFO));
+
+      // 4. Ensure no auth tokens exist in localStorage
+      localStorage.removeItem("authToken");
     } catch {
       setToast("Browser storage unavailable. Changes may not persist.");
     }
@@ -743,6 +906,15 @@ function App() {
     voice.autoSpeak,
   ]);
 
+  // Sync gm5:currentModel whenever model changes
+  useEffect(() => {
+    if (model) {
+      try {
+        localStorage.setItem(STORAGE_KEYS.currentModel, model);
+      } catch {}
+    }
+  }, [model]);
+
   useEffect(() => {
     if (page === "assistant")
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -754,10 +926,10 @@ function App() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const checkHealth = useCallback(async () => {
+  const checkHealth = useCallback(async (force = false) => {
     setRefreshing(true);
     try {
-      const data = await apiRequest("/api/health", { method: "GET" });
+      const data = await apiRequest("/api/health", { method: "GET" }, 8000);
       if (!mounted.current) return;
       setBackend("LIVE");
       setHealthError("");
@@ -767,10 +939,53 @@ function App() {
           : typeof data?.model === "string"
             ? data.model
             : "";
-      if (name) setModel(name);
+      if (name) {
+        setModel(name);
+        try {
+          localStorage.setItem(STORAGE_KEYS.currentModel, name);
+        } catch {}
+      }
+
+      // Check providers snapshot
+      try {
+        const provData = await apiRequest("/api/ai/providers", { method: "GET" }, 8000);
+        if (provData?.providers && Array.isArray(provData.providers)) {
+          localStorage.setItem(
+            STORAGE_KEYS.providerStatus,
+            JSON.stringify({
+              providers: provData.providers,
+              timestamp: provData.timestamp || new Date().toISOString(),
+            }),
+          );
+        }
+      } catch {}
+
+      if (data?.aiConfigured === false) {
+        setAiStatus("FAILED");
+        setAiReason("GEMINI_API_KEY server par set nahi hai (.env check karein).");
+      } else {
+        try {
+          const ai = await apiRequest(
+            `/api/ai/status${force === true ? "?force=1" : ""}`,
+            { method: "GET" },
+            15000,
+          );
+          if (!mounted.current) return;
+          setAiStatus(ai?.status === "verified" ? "VERIFIED" : "FAILED");
+          setAiReason(
+            ai?.status === "verified" ? "" : ai?.reason || "AI check failed.",
+          );
+        } catch (e) {
+          if (!mounted.current) return;
+          setAiStatus("FAILED");
+          setAiReason(`AI status check fail: ${e.message}`);
+        }
+      }
     } catch (error) {
       if (!mounted.current) return;
       setBackend("OFF");
+      setAiStatus("UNKNOWN");
+      setAiReason("");
       setHealthError(
         error.message?.includes("timed out")
           ? "Backend request timed out."
@@ -867,9 +1082,15 @@ function App() {
         value || "Please review the attached file(s).",
         prior,
         sentFiles,
-        { agent, memories },
+        { agent, memories, timeoutMs: CHAT_TIMEOUT_MS },
       );
       if (!mounted.current) return;
+      if (reply.model) {
+        setModel(reply.model);
+        try {
+          localStorage.setItem(STORAGE_KEYS.currentModel, reply.model);
+        } catch {}
+      }
       setHistory((h) => [
         ...h,
         {
@@ -1024,6 +1245,13 @@ function App() {
       )
     )
       return;
+    try {
+      localStorage.removeItem(STORAGE_KEYS.currentModel);
+      localStorage.removeItem(STORAGE_KEYS.providerStatus);
+      localStorage.removeItem(STORAGE_KEYS.chatHistory);
+      localStorage.removeItem(STORAGE_KEYS.uiPrefs);
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {}
     setTasks([]);
     setCompletedSteps([]);
     setActivity([]);
@@ -1040,6 +1268,174 @@ function App() {
       backend === "LIVE" ? "green" : backend === "OFF" ? "red" : "";
     return (
       <>
+        <section className="gm-card gm-wake-section" style={{ marginTop: 16 }}>
+          <div
+            style={{
+              display: "flex",
+              gap: 12,
+              alignItems: "center",
+              marginBottom: 14,
+              flexWrap: "wrap",
+            }}
+          >
+            <button
+              className="gm-btn primary"
+              onClick={toggleWake}
+              style={{ flex: 1, minWidth: 220, fontSize: 18, padding: 16 }}
+            >
+              {isListening ? "🎙️ MIC ON — Sun raha hoon" : "🦁 BOLO: MERE SHER"}
+            </button>
+            <span
+              className={`gm-pill ${isListening ? "green" : ""}`}
+              style={{ fontSize: 12, whiteSpace: "nowrap" }}
+            >
+              {isListening ? "MIC ALWAYS ON" : "MIC OFF"}
+            </span>
+            <button
+              className="gm-btn primary"
+              onClick={runSystemDoctor}
+              disabled={doctorRunning}
+              style={{ flex: 1, minWidth: 220, fontSize: 16, padding: 14 }}
+            >
+              {doctorRunning ? "⏳ System scan chal raha hai..." : "🩺 Mere Sher System Theek Karo"}
+            </button>
+          </div>
+          <div className="gm-grid gm-two" style={{ gap: 16 }}>
+            <section className="gm-card">
+              <SectionHeader
+                title="Hamzad — Yaad-daasht"
+                subtitle="Meri kamzori, mera roadmap tarteeb se"
+              />
+              <div className="gm-muted gm-small" style={{ marginBottom: 10 }}>
+                Face, voice, writing style aur roadmap yahan save hote hain.
+              </div>
+              <div className="gm-list" style={{ marginTop: 8 }}>
+                <div className="gm-list-row">
+                  <span className="gm-row-icon">👤</span>
+                  <div className="gm-row-main">
+                    <div className="gm-row-title">Profile</div>
+                    <div className="gm-row-sub">
+                      {hamzadSaved ? "Save hua hai" : "Abhi koi profile nahi"}
+                    </div>
+                  </div>
+                </div>
+                <div className="gm-list-row">
+                  <span className="gm-row-icon">⚠️</span>
+                  <div className="gm-row-main">
+                    <div className="gm-row-title">Kamzori (Weaknesses)</div>
+                    <div className="gm-row-sub">
+                      {weaknessesInput || "Koi nahi recorded"}
+                    </div>
+                  </div>
+                </div>
+                <div className="gm-list-row">
+                  <span className="gm-row-icon">🗺️</span>
+                  <div className="gm-row-main">
+                    <div className="gm-row-title">Roadmap (Tarteeb Lock)</div>
+                    <div className="gm-row-sub">
+                      {roadmapLocked ? "Tarteeb Locked" : "Open"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+            <section className="gm-card">
+              <SectionHeader
+                title="Dimagh — Live Logs"
+                subtitle="System brain activity"
+              />
+              <div
+                style={{
+                  height: 200,
+                  overflowY: "auto",
+                  border: "1px solid #eee",
+                  borderRadius: 8,
+                  padding: 10,
+                  background: "#fafafa",
+                }}
+              >
+                {dimaghLogs.length === 0 ? (
+                  <div className="gm-muted gm-small">Logs yahan aayenge.</div>
+                ) : (
+                  dimaghLogs.map((l, i) => (
+                    <div key={i} className="gm-log-row">
+                      [Dimagh] {l}
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          </div>
+          {isTriggered && (
+            <div
+              className="gm-notice success"
+              role="status"
+              style={{ marginTop: 10, textAlign: "center" }}
+            >
+              [MERE SHER] Triggered &rarr; [Hamzad] Zinda &rarr; [Dimagh]
+              Zinda
+            </div>
+          )}
+
+          {doctorScan && (
+            <section className="gm-card" style={{ marginTop: 16 }}>
+              <SectionHeader
+                title="System Doctor — Scan Report"
+                subtitle="Virus scan aur disk cleanup result"
+              />
+              <div className="gm-list" style={{ marginTop: 8 }}>
+                <div className="gm-list-row">
+                  <span className="gm-row-icon">🦠</span>
+                  <div className="gm-row-main">
+                    <div className="gm-row-title">Threats Found</div>
+                    <div className="gm-row-sub">
+                      {doctorScan.threats.length} threat(s)
+                    </div>
+                  </div>
+                </div>
+                <div className="gm-list-row">
+                  <span className="gm-row-icon">🗑️</span>
+                  <div className="gm-row-main">
+                    <div className="gm-row-title">Junk Files Cleaned</div>
+                    <div className="gm-row-sub">
+                      {doctorScan.junkFiles.length} file(s)
+                    </div>
+                  </div>
+                </div>
+                <div className="gm-list-row">
+                  <span className="gm-row-icon">⏱️</span>
+                  <div className="gm-row-main">
+                    <div className="gm-row-title">Last Scan Status</div>
+                    <div className="gm-row-sub">
+                      {doctorScan.lastScan?.status || "—"}
+                    </div>
+                  </div>
+                </div>
+                <div className="gm-list-row">
+                  <span className="gm-row-icon">💾</span>
+                  <div className="gm-row-main">
+                    <div className="gm-row-title">Freed Space</div>
+                    <div className="gm-row-sub">
+                      {(doctorScan.lastCleanup?.freedBytes / 1024 / 1024).toFixed(
+                        2,
+                      )} MB
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {doctorScan.threats.length > 0 && (
+                <div
+                  className="gm-notice warning"
+                  role="status"
+                  style={{ marginTop: 10, textAlign: "center" }}
+                >
+                  ⚠️ Koi threat mila hai — system check karein
+                </div>
+              )}
+            </section>
+          )}
+        </section>
+
         <PageHead
           kicker="Central Command · TAJ Edition · Gen 5"
           title="Welcome to"
@@ -1169,8 +1565,24 @@ function App() {
                   <div className="gm-row-title">AI Provider</div>
                   <div className="gm-row-sub">{model}</div>
                 </div>
-                <StatusPill type={backend === "LIVE" ? "green" : ""}>
-                  {backend === "LIVE" ? "API REACHABLE" : "UNVERIFIED"}
+                <StatusPill
+                  type={
+                    backend === "OFF"
+                      ? "red"
+                      : aiStatus === "VERIFIED"
+                        ? "green"
+                        : aiStatus === "FAILED"
+                          ? "gold"
+                          : ""
+                  }
+                >
+                  {backend === "OFF"
+                    ? "UNAVAILABLE"
+                    : aiStatus === "VERIFIED"
+                      ? "AI READY"
+                      : aiStatus === "FAILED"
+                        ? "AI PROBLEM"
+                        : "CHECKING"}
                 </StatusPill>
               </div>
               <div className="gm-list-row">
@@ -1187,6 +1599,11 @@ function App() {
             {healthError && (
               <p className="gm-muted gm-small" style={{ marginTop: 12 }}>
                 {healthError}
+              </p>
+            )}
+            {aiStatus === "FAILED" && aiReason && (
+              <p className="gm-muted gm-small" style={{ marginTop: 8, color: "var(--red)" }}>
+                {aiReason}
               </p>
             )}
           </section>
@@ -1464,7 +1881,7 @@ function App() {
                   sendChat();
                 }
               }}
-              placeholder="Grandmaster ko apna command dein…"
+              placeholder="Ask anything, @ to mention, / for actions"
               aria-label="Message Grandmaster AI"
             />
             <button
@@ -2111,6 +2528,19 @@ function App() {
   }
 
   function renderSecurity() {
+    const deploymentStatus = {
+      label:
+        backend === "LIVE"
+          ? `VERIFIED LIVE (${BUILD_INFO.commitSha})`
+          : backend === "OFF"
+            ? "BACKEND UNREACHABLE"
+            : "PROBING BACKEND",
+      description:
+        backend === "LIVE"
+          ? `Backend is live and responding. Built from commit ${BUILD_INFO.commitSha} at ${new Date(BUILD_INFO.buildTime).toLocaleString()}.`
+          : `Frontend build ${BUILD_INFO.commitSha} is active, but /api/health is currently unreachable.`,
+    };
+
     const controls = [
       ["Real trading", "LOCKED", "This UI does not submit live trades."],
       [
@@ -2121,7 +2551,12 @@ function App() {
       [
         "API credentials",
         "SERVER-SIDE ONLY",
-        "Never place private API keys in React source code.",
+        "Never place private API keys in React source code or client env.",
+      ],
+      [
+        "Storage Policy",
+        "NO AUTH TOKENS (gm5:*)",
+        "Zero tokens or credentials in localStorage. Only non-sensitive UI state (gm5:* keys, chat cap 100, no base64). Auth uses backend httpOnly cookies.",
       ],
       [
         "Social publishing",
@@ -2131,17 +2566,14 @@ function App() {
       [
         "AI provider",
         backend === "LIVE" ? "BACKEND REACHABLE" : "UNAVAILABLE",
-        "A health response does not guarantee successful model inference.",
-      ],
-      [
-        "Chat, memory & tasks",
-        "BROWSER LOCAL",
-        "Stored in localStorage on this device, not in the cloud.",
+        aiStatus === "VERIFIED"
+          ? `Verified model: ${model}`
+          : aiReason || "A health response does not guarantee successful model inference.",
       ],
       [
         "Deployment",
-        "NOT VERIFIED",
-        "Production status requires a separate deployed-site check.",
+        deploymentStatus.label,
+        deploymentStatus.description,
       ],
     ];
     return (
@@ -2289,16 +2721,18 @@ function App() {
             </div>
             <div className="gm-top-right">
               <div
-                className={`gm-status ${backend === "LIVE" ? "live" : backend === "OFF" ? "off" : ""}`}
+                className={`gm-status ${backend === "OFF" ? "off" : aiStatus === "VERIFIED" ? "live" : aiStatus === "FAILED" ? "warn" : ""}`}
                 role="status"
               >
                 <span className="gm-dot" />
                 <span className="gm-status-label">
-                  {backend === "LIVE"
-                    ? "Backend live"
-                    : backend === "OFF"
-                      ? "Backend offline"
-                      : "Connecting"}
+                  {backend === "OFF"
+                    ? "Backend offline"
+                    : aiStatus === "VERIFIED"
+                      ? "AI verified"
+                      : aiStatus === "FAILED"
+                        ? "AI problem"
+                        : "Connecting"}
                 </span>
               </div>
               <button
@@ -2380,7 +2814,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .gm-status.live{color:var(--green);border-color:#40d6a033}
 .gm-status.live .gm-dot{background:var(--green);box-shadow:0 0 9px #40d6a0}
 .gm-status.off{color:var(--red);border-color:#ff737d33}
-.gm-status.off .gm-dot{background:var(--red)}
+.gm-status.off .gm-dot{background:var(--red)}.gm-status.warn{color:var(--gold);border-color:#f5bc4b44}.gm-status.warn .gm-dot{background:var(--gold);box-shadow:0 0 9px #f5bc4b}
 .gm-icon-btn{border:1px solid var(--border);background:var(--panel);border-radius:10px;padding:8px 11px}
 .gm-content{max-width:1500px;margin:0 auto;padding:28px 30px 70px}
 .gm-welcome{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:26px}

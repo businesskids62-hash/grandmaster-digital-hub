@@ -1,0 +1,1 @@
+Get-Volume C:,D: | Select-Object DriveLetter, FileSystemLabel, DriveType, @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}}, @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,2)}}, @{N='UsedGB';E={[math]::Round(($_.Size-$_.FreeSpace)/1GB,2)}}, @{N='FreePct';E={[math]::Round($_.FreeSpace/$_.Size*100,1)}} | Format-Table -AutoSize

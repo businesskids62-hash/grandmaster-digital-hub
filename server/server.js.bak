@@ -1,0 +1,241 @@
+import dns from "node:dns";
+// Big fix for slow/timeouting fetch on Windows: prefer IPv4 instead of waiting on broken IPv6.
+dns.setDefaultResultOrder("ipv4first");
+
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import { AIError, generateReply, getAIConfig } from "./services/aiAdapter.js";
+
+const PORT = Number(process.env.PORT) || 5000;
+const MAX_MESSAGE_CHARS = 8000;
+const MAX_HISTORY_ITEMS = 12;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_PER_MINUTE) || 30;
+
+// CORS restricted to the Vite dev frontend. curl/same-origin (no Origin header) still allowed.
+const CORS_ORIGINS = (process.env.CORS_ORIGIN || "http://localhost:5173")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+export function createApp() {
+  const app = express();
+
+  app.disable("x-powered-by");
+  app.use(express.json({ limit: "45mb" }));
+
+  app.use(
+    cors({
+      origin(origin, callback) {
+        // Allow same-origin / non-browser requests (no Origin header) and listed origins.
+        if (!origin || CORS_ORIGINS.includes(origin))
+          return callback(null, true);
+        return callback(new Error("Origin not allowed by CORS."));
+      },
+    }),
+  );
+
+  // Simple in-memory rate limiter for the chat endpoint.
+  const hits = new Map();
+  function rateLimit(req, res, next) {
+    const now = Date.now();
+    const key = req.ip || "unknown";
+    const recent = (hits.get(key) || []).filter(
+      (time) => now - time < RATE_LIMIT_WINDOW_MS,
+    );
+
+    if (recent.length >= RATE_LIMIT_MAX) {
+      return res
+        .status(429)
+        .json({
+          error: "Too many requests. Please wait a minute and try again.",
+        });
+    }
+
+    recent.push(now);
+    hits.set(key, recent);
+    return next();
+  }
+
+  app.get("/api/health", (_req, res) => {
+    const config = getAIConfig();
+    // Instant response; never calls the AI provider.
+    res.json({
+      ok: true,
+      uptime: Math.round(process.uptime()),
+      provider: config.provider,
+      model: config.model,
+      aiConfigured: config.configured,
+    });
+  });
+
+  // Lightweight AI provider verification (one tiny metadata call, 10s timeout).
+  app.get("/api/ai/status", async (_req, res) => {
+    const config = getAIConfig();
+    if (!config.configured) {
+      return res.json({
+        status: "failed",
+        reason: "GEMINI_API_KEY / AI_API_KEY is not set in server/.env.",
+        model: config.model,
+      });
+    }
+    const started = Date.now();
+    let timer;
+    try {
+      const controller = new AbortController();
+      timer = setTimeout(() => controller.abort(), 10000);
+      const response = await fetch(
+        `${config.baseUrl}/models/${encodeURIComponent(config.model)}`,
+        { headers: { "x-goog-api-key": config.apiKey }, signal: controller.signal },
+      );
+      clearTimeout(timer);
+      timer = null;
+      if (response.ok) {
+        return res.json({
+          status: "verified",
+          reason: "",
+          model: config.model,
+          latencyMs: Date.now() - started,
+        });
+      }
+      let detail = "";
+      try {
+        detail = (await response.json())?.error?.message || "";
+      } catch { /* ignore non-JSON error body */ }
+      const reason =
+        response.status === 400 || response.status === 403
+          ? `Invalid API key or key not allowed for this model (HTTP ${response.status}).`
+          : response.status === 404
+            ? `Model "${config.model}" not found for this key.`
+            : response.status === 429
+              ? "Gemini quota/rate limit reached."
+              : `Gemini returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 120)}` : ""}`;
+      return res.json({ status: "failed", reason, model: config.model });
+    } catch (error) {
+      if (timer) clearTimeout(timer);
+      const reason =
+        error.name === "AbortError"
+          ? "Request to Gemini timed out after 10s (network to Google may be slow/blocked)."
+          : `Gemini unreachable: ${error.message}`;
+      return res.json({ status: "failed", reason, model: config.model });
+    }
+  });
+
+  app.post("/api/chat", rateLimit, async (req, res, next) => {
+    try {
+      const { message, history } = req.body || {};
+
+      if (typeof message !== "string" || !message.trim()) {
+        return res
+          .status(400)
+          .json({ error: "A non-empty 'message' string is required." });
+      }
+
+      if (message.length > MAX_MESSAGE_CHARS) {
+        return res
+          .status(400)
+          .json({
+            error: `Message is too long (max ${MAX_MESSAGE_CHARS} characters).`,
+          });
+      }
+
+      if (history !== undefined && !Array.isArray(history)) {
+        return res.status(400).json({ error: "'history' must be an array." });
+      }
+
+      const safeHistory = (history || [])
+        .slice(-MAX_HISTORY_ITEMS)
+        .filter((item) => item && typeof item.content === "string")
+        .map((item) => ({
+          role: item.role === "user" ? "user" : "assistant",
+          content: item.content.slice(0, MAX_MESSAGE_CHARS),
+        }));
+
+      const reply = await generateReply({
+        message: message.trim(),
+        history: safeHistory,
+      });
+      return res.json({ reply });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  app.use("/api", (req, res) => {
+    res.status(404).json({ error: "Endpoint not found." });
+  });
+
+  // eslint-disable-next-line no-unused-vars
+  app.use((error, req, res, next) => {
+    if (error instanceof AIError) {
+      console.error(`[ai] ${error.status} ${error.message}`);
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    if (error?.type === "entity.parse.failed") {
+      return res.status(400).json({ error: "Request body is not valid JSON." });
+    }
+
+    if (error?.type === "entity.too.large") {
+      return res.status(413).json({ error: "Request body is too large." });
+    }
+
+    if (error?.message === "Origin not allowed by CORS.") {
+      return res.status(403).json({ error: error.message });
+    }
+
+    console.error("[server] Unexpected error:", error);
+    return res.status(500).json({ error: "Internal server error." });
+  });
+
+  return app;
+}
+
+const isMain =
+  process.argv[1] &&
+  import.meta.url === new URL(`file://${process.argv[1]}`).href;
+
+if (isMain) {
+  const app = createApp();
+  const config = getAIConfig();
+
+  app.listen(PORT, () => {
+    console.log(`Grandmaster server listening on http://localhost:${PORT}`);
+    console.log(
+      config.configured
+        ? `AI provider: ${config.provider} (${config.model})`
+        : `AI provider NOT ready: ${config.problem}`,
+    );
+  });
+
+  // Validate the configured model at startup (non-fatal; /api/ai/status reports details).
+  if (config.configured) {
+    (async () => {
+      let timer;
+      try {
+        const controller = new AbortController();
+        timer = setTimeout(() => controller.abort(), 10000);
+        const response = await fetch(
+          `${config.baseUrl}/models/${encodeURIComponent(config.model)}`,
+          { headers: { "x-goog-api-key": config.apiKey }, signal: controller.signal },
+        );
+        clearTimeout(timer);
+        timer = null;
+        if (!response.ok) {
+          console.warn(
+            `[startup] Model "${config.model}" may be unavailable (HTTP ${response.status}). ` +
+              `Consider setting GEMINI_MODEL=gemini-3.8-flash in server/.env.`,
+          );
+        } else {
+          console.log(`[startup] Model "${config.model}" validated.`);
+        }
+      } catch (error) {
+        if (timer) clearTimeout(timer);
+        console.warn(
+          `[startup] Could not validate model "${config.model}": ${error.message}`,
+        );
+      }
+    })();
+  }
+}
