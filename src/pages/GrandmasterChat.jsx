@@ -116,7 +116,7 @@ export default function GrandmasterChat() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto w-full px-3 sm:px-6 py-4">
+    <div className="max-w-5xl mx-auto w-full px-3 sm:px-6 py-4">
       <div className="flex flex-col h-[calc(100dvh-9rem)] min-h-[480px] rounded-2xl border border-white/10 bg-slate-900/80 backdrop-blur overflow-hidden shadow-xl">
         {/* Header */}
         <div className="flex-shrink-0 flex items-center justify-between gap-3 px-4 py-3 border-b border-white/10">
