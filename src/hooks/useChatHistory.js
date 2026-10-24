@@ -37,3 +37,10 @@ async function askGrandmaster(message, history = [], files = []) {
   }
   return reply;
 }
+
+export const INITIAL_WELCOME_MESSAGE = {
+  id: 'welcome-msg',
+  role: 'assistant',
+  content: 'Welcome to Grandmaster Digital Hub! How can I assist you today?',
+  timestamp: new Date().toISOString(),
+};
