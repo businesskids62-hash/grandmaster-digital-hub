@@ -1,6 +1,7 @@
 export default async function handler(req, res) {
   // Updated with retry and fallback logic
   res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -25,10 +26,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Message exceeds maximum length of 8000 characters." });
     }
 
-    // Configurable model with fallback
-    const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-    const fallbackModel = process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash';
-    const modelOrder = [model, fallbackModel];
+    // Configurable model priority
+    const primaryModel = "gemini-2.0-flash";
+    const fallbackModel = "gemini-1.5-flash";
     const apiKey = process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
 
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
