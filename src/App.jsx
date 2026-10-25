@@ -45,6 +45,44 @@ const BUILD_INFO =
 const STORAGE_KEY = "grandmaster_dashboard_v5";
 const REQUEST_TIMEOUT_MS = 90000;
 const CHAT_TIMEOUT_MS = 30000; // chat must answer within 30s or show an error
+const SAFE_FETCH_JSON_TIMEOUT_MS = 15000;
+
+// Helper: fetch JSON with proper error handling
+async function safeFetchJson(input, init = {}, timeoutMs = SAFE_FETCH_JSON_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(input, { ...init, signal: controller.signal });
+    clearTimeout(timer);
+    if (!response.ok) {
+      const bodyText = await response.text().catch(() => "No response body");
+      return {
+        ok: false,
+        error: `HTTP ${response.status}: ${response.statusText}`,
+        body: bodyText.substring(0, 200),
+      };
+    }
+    // Check content-type is JSON
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      const bodyText = await response.text().catch(() => "No response body");
+      return {
+        ok: false,
+        error: `Expected application/json but got: ${contentType.trim()}`,
+        body: bodyText.substring(0, 200),
+      };
+    }
+    const data = await response.json();
+    return { ok: true, data };
+  } catch (error) {
+    clearTimeout(timer);
+    if (error.name === "AbortError") {
+      return { ok: false, error: `Request timed out after ${timeoutMs}ms` };
+    }
+    return { ok: false, error: error.message || "Fetch failed" };
+  }
+}
+
 const MAX_FILES = 5;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_HISTORY_SAVED = 100;

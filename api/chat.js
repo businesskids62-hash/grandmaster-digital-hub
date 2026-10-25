@@ -1,4 +1,5 @@
 export default async function handler(req, res) {
+  // Updated with retry and fallback logic
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -26,6 +27,8 @@ export default async function handler(req, res) {
 
     // Configurable model with fallback
     const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+    const fallbackModel = process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash';
+    const modelOrder = [model, fallbackModel];
     const apiKey = process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
 
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
