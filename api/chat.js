@@ -26,8 +26,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Message exceeds maximum length of 8000 characters." });
     }
 
-    // Configurable model priority
-    const primaryModel = "gemini-2.0-flash";
+    const primaryModel = "gemini-2.0-flash-exp";
     const fallbackModel = "gemini-1.5-flash";
     const apiKey = process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
 
@@ -35,7 +34,7 @@ export default async function handler(req, res) {
       return res.status(503).json({
         error: 'GEMINI_API_KEY not configured. Please set GEMINI_API_KEY in environment.',
         provider: 'gemini',
-        model,
+        model: primaryModel,
       });
     }
 
@@ -44,65 +43,26 @@ export default async function handler(req, res) {
       Always provide helpful, concise responses. Never echo the user's prompt as your reply.
       Think step-by-step and provide actual insights.`;
 
-    // Call Google Gemini API
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-
-    const payload = {
-      systemInstruction: {
-        role: "user",
-        parts: [{ text: systemPrompt }],
-      },
-      contents: [{
-        role: "user",
-        parts: [{ text: message }],
-      }],
-    };
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
-
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timer);
-
-      if (!response.ok) {
-        const errText = await response.text().catch(() => "Unknown error");
-        return res.status(response.status).json({
-          error: `Gemini API error: ${response.status}`,
-          provider: "gemini",
-          model,
-          rawError: errText.substring(0, 200),
-        });
-      }
-
-      const data = await response.json();
-      const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-      return res.status(200).json({
-        reply,
-        provider: "gemini",
-        model,
-        attempts: [],
-      });
-    } catch (fetchError) {
-      clearTimeout(timer);
-      if (fetchError.name === "AbortError") {
-        return res.status(504).json({
-          error: "Request to Gemini timed out after 30s.",
-          provider: "gemini",
-          model,
-        });
-      }
-      throw fetchError;
+    async function callGemini(modelName, prompt){
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${process.env.GEMINI_API_KEY}`
+      const resp = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({contents:[{parts:[{text:prompt}]}]}) })
+      const data = await resp.json()
+      if(!resp.ok) throw new Error(data.error?.message || 'Gemini error')
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response"
     }
+
+    let answer
+    try {
+      answer = await callGemini(primaryModel, message)
+    } catch(e){
+      console.log("Primary failed, fallback:", e.message)
+      answer = await callGemini(fallbackModel, message)
+    }
+
+    return res.status(200).json({
+      reply: answer,
+      provider: 'gemini',
+    })
   } catch (error) {
     return res.status(500).json({
       error: error.message || "AI provider processing failed.",
