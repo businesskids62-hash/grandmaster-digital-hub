@@ -13,8 +13,8 @@ export default function handler(req, res) {
 
   if (!keyConfigured) {
     res.status(503).json({
-      ok: false,
-      error: 'GEMINI_API_KEY not configured. Please set GEMINI_API_KEY in environment.',
+      status: 'failed',
+      reason: 'GEMINI_API_KEY not configured. Please set GEMINI_API_KEY in environment.',
       provider: aiProvider,
       model,
     });
@@ -22,7 +22,8 @@ export default function handler(req, res) {
   }
 
   res.status(200).json({
-    ok: true,
+    status: 'verified',
+    reason: '',
     provider: aiProvider,
     model,
   });
