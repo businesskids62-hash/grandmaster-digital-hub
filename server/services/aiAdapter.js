@@ -19,7 +19,7 @@ export function getAIConfig(env = process.env) {
   return {
     provider: primary.provider,
     model: primary.model,
-    baseUrl: "https://generativelanguage.googleapis.com/v1",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
     configured: isConfigured,
     problem: isConfigured ? "" : "API key is not configured.",
   };
@@ -69,7 +69,7 @@ export async function generateAiReply(
       ? "https://api.anthropic.com"
       : provider === "openai"
       ? "https://api.openai.com/v1"
-      : "https://generativelanguage.googleapis.com/v1";
+      : "https://generativelanguage.googleapis.com/v1beta";
 
   let url;
   let body;
@@ -85,17 +85,48 @@ export async function generateAiReply(
     body = { model, messages: [{ role: "user", content: message }] };
   }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  async function callProvider() {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
-  if (!response.ok) {
-    throw new Error(`Provider ${provider} returned ${response.status}`);
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      const err = new Error(errData.error?.message || `Provider ${provider} returned ${response.status}`);
+      err.status = response.status;
+      throw err;
+    }
+
+    return response.json();
   }
 
-  const data = await response.json();
+  async function tryWithRetry(tries = 3) {
+    let lastError;
+    for (let i = 0; i < tries; i++) {
+      try {
+        return await callProvider();
+      } catch (err) {
+        lastError = err;
+        const status = err.status;
+        if (status === 400 || status === 401 || status === 403 || status === 404) {
+          throw err;
+        }
+        if (status === 429 || status === 500 || status === 503) {
+          if (i < tries - 1) {
+            const delay = Math.pow(2, i) * 1000;
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+        }
+        throw err;
+      }
+    }
+    throw lastError;
+  }
+
+  const data = await tryWithRetry();
 
   let text = "";
   if (provider === "gemini") {
