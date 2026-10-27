@@ -16,7 +16,7 @@ Key architectural accomplishments:
 - **Dedicated Chat Page (`/grandmaster/`):** Full-featured responsive chat window with Grandmaster branding, dual message bubbles, multiline input with Shift+Enter support, copy response feedback, new session creation, clear conversation confirmation modal, and dark/light mode compatibility.
 - **English & Roman Urdu Support:** System instruction configured for English and Roman Urdu dialogue, with initial suggestion pills and a comprehensive welcome prompt explaining ecosystem capabilities.
 - **Backend API Gateway & Credential Isolation:** Zero secret keys are exposed to the client browser. API requests are routed through a minimal Node.js HTTP gateway (`/api/chat`, `/api/health`) with request timeouts (30s), rate-limit handling, payload validation, and CORS support.
-- **Provider-Agnostic Adapter:** Pluggable AI adapter (`server/services/aiAdapter.js`) configured for Google Gemini (`gemini-1.5-flash`), with structured error reporting and zero fake/canned answers when the API key is unconfigured or unavailable.
+- **Provider-Agnostic Adapter:** Pluggable AI adapter (`server/services/aiAdapter.js`) configured for Google Gemini (`gemini-2.5-flash`), with structured error reporting and zero fake/canned answers when the API key is unconfigured or unavailable.
 - **Robust Local Conversation History:** Browser `localStorage` persistence with safe corrupted-data recovery and explicit documentation that storage is currently device-local.
 - **Configuration Security:** Added `.gitignore` protecting secrets, and `.env.example` with placeholder variable names.
 
@@ -82,7 +82,7 @@ To connect a live Google Gemini model:
 2. Open `.env` and set your Google Gemini API key:
    ```env
    AI_PROVIDER=gemini
-   AI_MODEL=gemini-1.5-flash
+   AI_MODEL=gemini-2.5-flash
    GEMINI_API_KEY=your_actual_api_key_here
    PORT=5000
    ```

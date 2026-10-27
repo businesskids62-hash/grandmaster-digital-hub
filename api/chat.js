@@ -27,7 +27,7 @@ export default async function handler(req, res) {
     }
 
     const primaryModel = "gemini-2.0-flash-exp";
-    const fallbackModel = "gemini-1.5-flash";
+    const fallbackModel = "gemini-2.5-flash";
     const apiKey = process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
 
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
