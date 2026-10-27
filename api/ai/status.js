@@ -1,30 +1,24 @@
-export default function handler(req, res) {
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+import { verifyProvider } from "../../lib/aiProviders.js";
+import { prepare, sendJson } from "../../lib/vercelHttp.js";
 
-  const apiKey = process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
-  const model = process.env.GEMINI_MODEL || process.env.AI_MODEL || 'gemini-3.8-flash';
-  const aiProvider = process.env.AI_PROVIDER || 'gemini';
+// "verified" is only returned after a real provider call succeeds.
+// Key presence alone is never reported as verified.
+export default async function handler(req, res) {
+  prepare(req, res, process.env);
+  if (res.writableEnded) return;
 
-  // Never expose the actual key - only indicate if configured
-  const keyConfigured = !!(apiKey && apiKey !== 'your_gemini_api_key_here');
-
-  if (!keyConfigured) {
-    res.status(503).json({
-      status: 'failed',
-      reason: 'GEMINI_API_KEY not configured. Please set GEMINI_API_KEY in environment.',
-      provider: aiProvider,
-      model,
-    });
-    return;
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.setHeader("Allow", "GET, HEAD");
+    return res.status(405).json({ error: "Method not allowed. Use GET." });
   }
 
-  res.status(200).json({
-    status: 'verified',
-    reason: '',
-    provider: aiProvider,
-    model,
+  const result = await verifyProvider(process.env, { timeoutMs: 10_000 });
+  return sendJson(res, 200, {
+    status: result.status,
+    reason: result.reason || "",
+    provider: result.provider || "gemini",
+    model: result.model,
+    latencyMs: result.latencyMs,
+    providers: result.providers,
   });
 }

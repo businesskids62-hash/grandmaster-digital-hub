@@ -1,27 +1,30 @@
-export default function handler(req, res) {
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+import { getProviderStatusList, parseProviders } from "../lib/aiProviders.js";
+import { prepare, sendJson } from "../lib/vercelHttp.js";
 
-  // Check if GEMINI_API_KEY is configured
-  const apiKey = process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
-  const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+// Legacy endpoint kept for compatibility.
+// It reports configuration only; it never claims the backend or AI is verified.
+export default async function handler(req, res) {
+  prepare(req, res, process.env);
+  if (res.writableEnded) return;
 
-  if (!apiKey || apiKey === 'your_gemini_api_key_here') {
-    res.status(503).json({
-      ok: false,
-      error: 'GEMINI_API_KEY not configured. Please set GEMINI_API_KEY in environment.',
-      provider: 'gemini',
-      model,
-    });
-    return;
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.setHeader("Allow", "GET, HEAD");
+    return res.status(405).json({ error: "Method not allowed. Use GET." });
   }
 
-  res.status(200).json({
-    ok: true,
-    provider: 'gemini',
-    model,
-    backend: 'LIVE',
+  const statuses = getProviderStatusList(process.env);
+  const [provider, model] = (parseProviders(process.env)[0] || "").split(":");
+  const configured = statuses.some((item) => item.configured);
+
+  return sendJson(res, configured ? 200 : 503, {
+    ok: configured,
+    backend: "reachable",
+    provider: provider || "gemini",
+    model: model || "configured-model",
+    configured,
+    aiVerified: false,
+    reason: configured
+      ? "The key is configured. Call /api/ai/status for real verification."
+      : "GEMINI_API_KEY is not configured on the server.",
   });
 }

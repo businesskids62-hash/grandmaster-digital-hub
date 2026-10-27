@@ -18,6 +18,10 @@ dist-ssr
 .env.*
 !.env.example
 
+# Phase 3 local state (tasks, memories, audit events)
+data
+.tmp-test-data
+
 # Editor and OS
 .vscode/*
 !.vscode/extensions.json

@@ -12,6 +12,7 @@ import { doubleBrain } from "./agents/doubleBrain.js";
 import { systemDoctor } from "./agents/systemDoctor.js";
 import { agentOrchestrator } from "./agents/agentOrchestrator.js";
 import { startWakeWord, speakRoar } from "./utils/wakeWord.js";
+import AgentDesks from "./pages/AgentDesks.jsx";
 
 
 /* ==========================================================================
@@ -104,6 +105,7 @@ const NAVIGATION = [
   { id: "memory", icon: "◉", label: "Memory" },
   { id: "builder", icon: "⌘", label: "App Builder" },
   { id: "agents", icon: "⬡", label: "AI Team" },
+  { id: "desks", icon: "⌬", label: "Agent Operations" },
   { id: "roadmap", icon: "▤", label: "100-Step Roadmap" },
   { id: "projects", icon: "▣", label: "Projects & Tasks" },
   { id: "business", icon: "↗", label: "Business Center" },
@@ -2667,6 +2669,7 @@ function App() {
     memory: renderMemory,
     builder: renderBuilder,
     agents: renderAgents,
+    desks: () => <AgentDesks apiBase={API_BASE} />,
     roadmap: renderRoadmap,
     projects: renderProjects,
     business: renderBusiness,

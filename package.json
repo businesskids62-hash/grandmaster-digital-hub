@@ -7,7 +7,7 @@
     "dev": "vite",
     "server": "node server/server.js",
     "server:gen5": "node server.cjs",
-    "test": "node scripts/test-suite.js",
+    "test": "node scripts/test-suite.js && node --test tests/aiProviders.test.js tests/core.test.js tests/api.test.js tests/agentOperations.test.js",
     "build": "vite build",
     "preview": "vite preview"
   },

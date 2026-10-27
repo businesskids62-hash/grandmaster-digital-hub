@@ -9,9 +9,12 @@ import {
   executeProviderRotation,
   getProviderStatusList,
   parseProviders,
-  PROVIDER_DEFAULTS,
+  verifyProvider,
 } from "../lib/aiProviders.js";
 import { getAllowedOrigins } from "../lib/cors.js";
+import { handleV1 } from "../lib/api/v1.js";
+import { AGENT_REGISTRY } from "../lib/agents/registry.js";
+import { taskStore } from "../lib/tasks/taskStore.js";
 
 const PORT = Number(process.env.PORT) || 5000;
 const MAX_MESSAGE_CHARS = 8000;
@@ -23,6 +26,12 @@ export function createApp() {
   const app = express();
 
   app.disable("x-powered-by");
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    next();
+  });
   app.use(express.json({ limit: "45mb" }));
 
   const allowedOrigins = getAllowedOrigins(process.env);
@@ -61,17 +70,26 @@ export function createApp() {
   app.get("/api/health", (_req, res) => {
     const providers = parseProviders(process.env);
     const statuses = getProviderStatusList(process.env);
-    const primary = providers[0] || { provider: "gemini", model: "gemini-3.6-flash" };
+    const [primaryProvider, primaryModel] = (providers[0] || "").split(":");
     const hasConfigured = statuses.some((s) => s.configured);
+    const storage = taskStore.status();
 
     res.json({
       ok: true,
+      status: "online",
       uptime: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
-      provider: primary.provider,
-      model: primary.model,
+      provider: primaryProvider || "gemini",
+      model: primaryModel || "configured-model",
       aiConfigured: hasConfigured,
       providersCount: providers.length,
+      agentsCount: AGENT_REGISTRY.length,
+      storage: {
+        mode: storage.mode,
+        durable: storage.durable,
+        ephemeral: storage.ephemeral,
+        writable: storage.writable,
+      },
     });
   });
 
@@ -84,86 +102,37 @@ export function createApp() {
     });
   });
 
-  // Lightweight AI provider verification
+  // Real, meaningful provider verification (no "verified" claim on key presence alone).
   app.get("/api/ai/status", async (_req, res) => {
-    const providers = getProviderStatusList(process.env);
-    const primary = providers[0];
+    const result = await verifyProvider(process.env);
+    return res.json({
+      status: result.status,
+      reason: result.reason || "",
+      provider: result.provider || "gemini",
+      model: result.model,
+      latencyMs: result.latencyMs,
+      providers: result.providers,
+    });
+  });
 
-    if (!primary || !primary.configured) {
-      return res.json({
-        status: "failed",
-        reason: "GEMINI_API_KEY / AI_API_KEY is not set in server/.env.",
-        model: primary?.model || "unknown",
-        providers,
-      });
+  // Phase 3 core API. Shared with the Vercel serverless adapter.
+  app.use("/api/v1", async (req, res) => {
+    const url = new URL(req.originalUrl, "http://localhost");
+    const result = await handleV1({
+      method: req.method,
+      path: url.pathname.replace(/^\/api\/v1/, ""),
+      query: Object.fromEntries(url.searchParams),
+      headers: req.headers,
+      body: req.body,
+      env: process.env,
+      clientKey: req.ip,
+    });
+    res.setHeader("X-Request-Id", result.requestId);
+    res.setHeader("Cache-Control", "no-store");
+    for (const [key, value] of Object.entries(result.headers || {})) {
+      res.setHeader(key, value);
     }
-
-    const key = (process.env.GEMINI_API_KEY || process.env.AI_API_KEY || "").trim();
-    const started = Date.now();
-    let reply = "";
-    let timer;
-    try {
-      const controller = new AbortController();
-      timer = setTimeout(() => controller.abort(), 10000);
-      const url = `${PROVIDER_DEFAULTS.gemini.baseUrl}/models/${encodeURIComponent(primary.model)}:generateContent`;
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: "Reply with exactly: OK" }] }],
-          generationConfig: { maxOutputTokens: 256 },
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      timer = null;
-
-      if (response.ok) {
-        try {
-          const data = await response.json();
-          reply = (data?.candidates?.[0]?.content?.parts || [])
-            .map((p) => p?.text || "")
-            .join("");
-        } catch {}
-        if (reply.trim()) {
-          return res.json({
-            status: "verified",
-            reason: "",
-            model: primary.model,
-            latencyMs: Date.now() - started,
-            providers,
-          });
-        }
-      }
-
-      let detail = "";
-      try {
-        if (!response.ok) {
-          detail = (await response.json())?.error?.message || "";
-        }
-      } catch {}
-
-      const emptyReply = response.ok && !reply.trim();
-
-      const reason = emptyReply
-        ? "Gemini returned an empty response."
-        : response.status === 400 || response.status === 403
-          ? `Invalid API key or key not allowed for this model (HTTP ${response.status}).`
-          : response.status === 404
-          ? `Model "${primary.model}" not found for this key.`
-          : response.status === 429
-          ? "Gemini quota/rate limit reached."
-          : `Gemini returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 120)}` : ""}`;
-
-      return res.json({ status: "failed", reason, model: primary.model, providers });
-    } catch (error) {
-      if (timer) clearTimeout(timer);
-      const reason =
-        error.name === "AbortError"
-          ? "Request to Gemini timed out after 10s."
-          : `Gemini unreachable: ${error.message}`;
-      return res.json({ status: "failed", reason, model: primary.model, providers });
-    }
+    return res.status(result.status).json(result.body);
   });
 
   app.post("/api/chat", rateLimit, async (req, res, next) => {
@@ -256,11 +225,12 @@ const isMain =
 if (isMain) {
   const app = createApp();
   const providers = parseProviders(process.env);
-  const primary = providers[0] || { provider: "gemini", model: "gemini-3.6-flash" };
+  const [primaryProvider, primaryModel] = (providers[0] || "").split(":");
 
   app.listen(PORT, () => {
     console.log("Grandmaster Backend Running - Cline bypass OK");
     console.log(`Grandmaster server listening on http://localhost:${PORT}`);
-    console.log(`Configured AI providers (${providers.length}): ${providers.map((p) => p.id).join(", ")}`);
+    console.log(`Configured AI providers (${providers.length}): ${providers.join(", ")}`);
+    console.log(`Primary provider: ${primaryProvider || "gemini"} / ${primaryModel || "configured-model"}`);
   });
 }
