@@ -26,8 +26,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Message exceeds maximum length of 8000 characters." });
     }
 
-    const primaryModel = "gemini-2.0-flash-exp";
-    const fallbackModel = "gemini-2.0-flash";
+    const primaryModel = "gemini-3.8-flash-exp";
+    const fallbackModel = "gemini-3.8-flash";
     const apiKey = process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
 
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
