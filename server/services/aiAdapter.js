@@ -19,7 +19,7 @@ export function getAIConfig(env = process.env) {
   return {
     provider: primary.provider,
     model: primary.model,
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    baseUrl: "https://generativelanguage.googleapis.com/v1",
     configured: isConfigured,
     problem: isConfigured ? "" : "API key is not configured.",
   };
@@ -69,7 +69,7 @@ export async function generateAiReply(
       ? "https://api.anthropic.com"
       : provider === "openai"
       ? "https://api.openai.com/v1"
-      : "https://generativelanguage.googleapis.com/v1beta";
+      : "https://generativelanguage.googleapis.com/v1";
 
   let url;
   let body;

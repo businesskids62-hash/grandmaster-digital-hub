@@ -111,8 +111,8 @@ export default server;
 ---
 
 #### 4. `server/services/aiAdapter.js` — SDK Check, Model & Error Handling
-- **SDK:** Zero external SDK dependencies. Uses native `fetch` against Google Generative Language REST API (`v1beta`). `@google/generative-ai` is not installed or required.
-- **Model:** Default configured to `gemini-3.8-flash` (replaces deprecated `gemini-2.5-flash`).
+- **SDK:** Zero external SDK dependencies. Uses native `fetch` against Google Generative Language REST API (`v1`). `@google/generative-ai` is not installed or required.
+- **Model:** Default configured to `gemini-3.8-flash` (replaces deprecated `gemini-2.0-flash`).
 - **Error Handling:** 30-second `AbortController` timeout, 400 invalid key translation, 429 rate limit detection, and safety block handling.
 
 ```javascript
@@ -121,7 +121,7 @@ export async function generateAiReply({ message, history = [], provider = 'gemin
 ...
 async function callGeminiProvider({ message, history, model, apiKey }) {
   const targetModel = model || 'gemini-3.8-flash';
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(targetModel)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const endpoint = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(targetModel)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 ...
   if (!response.ok) {
     let errorDetail = '';
@@ -258,7 +258,7 @@ async function callGeminiProvider({ message, history, model, apiKey }) {
 2. **Architecture on Vercel:**
    - Vercel does not use `server/server.js` or Express. Instead, it serves [`api/chat.js`](file:///d:/GrandmasterDigitalHub/api/chat.js) and [`api/health.js`](file:///d:/GrandmasterDigitalHub/api/health.js) as independent serverless functions, reusing [`server/services/aiAdapter.js`](file:///d:/GrandmasterDigitalHub/server/services/aiAdapter.js).
 3. **Google Gemini Model Status:**
-   - The original default `gemini-2.5-flash` was rejected by the Gemini API (`404 models/gemini-2.5-flash is not found for API version v1beta`).
+   - The original default `gemini-2.0-flash` was rejected by the Gemini API (`404 models/gemini-2.0-flash is not found for API version v1`).
    - Querying `ModelService.ListModels` confirmed `gemini-3.8-flash` is active. Testing with `gemini-3.8-flash` produced verified live AI replies.
 4. **Credential Isolation:**
    - Client code in `src/` has no access to `GEMINI_API_KEY`. Keys are kept server-side only.
@@ -268,7 +268,7 @@ async function callGeminiProvider({ message, history, model, apiKey }) {
 ### 3. Smallest Justified Fix Only
 
 1. **Created [`vercel.json`](file:///d:/GrandmasterDigitalHub/vercel.json):** Added 12-line rewrite configuration to route client requests to `/index.html` while passing through `/api/*`.
-2. **Updated Model Default:** Changed default model parameter from `gemini-2.5-flash` to `gemini-3.8-flash` in `server/services/aiAdapter.js`, `server/server.js`, `api/chat.js`, `api/health.js`, `src/pages/GrandmasterChat.jsx`, and `.env.example`.
+2. **Updated Model Default:** Changed default model parameter from `gemini-2.0-flash` to `gemini-3.8-flash` in `server/services/aiAdapter.js`, `server/server.js`, `api/chat.js`, `api/health.js`, `src/pages/GrandmasterChat.jsx`, and `.env.example`.
 3. **Redeployed to Vercel:** Built and deployed to production alias `https://grandmaster-digital-hub.vercel.app`.
 
 ---

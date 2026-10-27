@@ -8,7 +8,7 @@ import {
 } from "../lib/aiProviders.js";
 
 const fakeEnv = {
-  AI_PROVIDERS: "gemini:gemini-2.5-flash,gemini:gemini-2.5-pro",
+  AI_PROVIDERS: "gemini:gemini-2.0-flash,gemini:gemini-2.5-pro",
   GEMINI_API_KEY: "mock-secret-key-12345",
 };
 
@@ -16,7 +16,7 @@ test("1. Fallback works when primary provider returns 429", async () => {
   resetBreakerState();
 
   const mockFetch = async (url) => {
-    if (url.includes("gemini-2.5-flash")) {
+    if (url.includes("gemini-2.0-flash")) {
       return {
         ok: false,
         status: 429,
@@ -43,12 +43,12 @@ test("1. Fallback works when primary provider returns 429", async () => {
 
   assert.equal(result.reply, "Pro model response");
   assert.equal(result.model, "gemini-2.5-pro");
-  assert.ok(result.attempts.some((a) => a.provider === "gemini:gemini-2.5-flash" && a.statusCode === 429));
+  assert.ok(result.attempts.some((a) => a.provider === "gemini:gemini-2.0-flash" && a.statusCode === 429));
   assert.ok(result.attempts.some((a) => a.provider === "gemini:gemini-2.5-pro" && a.status === "success"));
 
   // Check that flash is now in cooling state
   const statuses = getProviderStatusList(fakeEnv);
-  const flashStatus = statuses.find((s) => s.id === "gemini:gemini-2.5-flash");
+  const flashStatus = statuses.find((s) => s.id === "gemini:gemini-2.0-flash");
   assert.equal(flashStatus.state, "cooling");
   assert.ok(flashStatus.coolingUntil !== null);
 });
@@ -57,7 +57,7 @@ test("2. Fallback works when primary provider times out", async () => {
   resetBreakerState();
 
   const mockFetch = async (url) => {
-    if (url.includes("gemini-2.5-flash")) {
+    if (url.includes("gemini-2.0-flash")) {
       const err = new Error("The operation was aborted");
       err.name = "AbortError";
       throw err;
@@ -116,7 +116,7 @@ test("4. Cooldown skips cooling provider and attempts next available provider", 
 
   // First call: primary 429, fallback succeeds
   const mockFetchFirst = async (url) => {
-    if (url.includes("gemini-2.5-flash")) {
+    if (url.includes("gemini-2.0-flash")) {
       return {
         ok: false,
         status: 429,
@@ -143,7 +143,7 @@ test("4. Cooldown skips cooling provider and attempts next available provider", 
   // Second call: verify flash is skipped without calling fetch for it
   let flashCalled = false;
   const mockFetchSecond = async (url) => {
-    if (url.includes("gemini-2.5-flash")) {
+    if (url.includes("gemini-2.0-flash")) {
       flashCalled = true;
     }
     return {
@@ -164,6 +164,6 @@ test("4. Cooldown skips cooling provider and attempts next available provider", 
 
   assert.equal(flashCalled, false, "Cooling provider must be skipped immediately");
   assert.equal(result2.reply, "Success Pro Call 2");
-  const skipAttempt = result2.attempts.find((a) => a.provider === "gemini:gemini-2.5-flash");
+  const skipAttempt = result2.attempts.find((a) => a.provider === "gemini:gemini-2.0-flash");
   assert.equal(skipAttempt.status, "cooling_skipped");
 });

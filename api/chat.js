@@ -27,7 +27,7 @@ export default async function handler(req, res) {
     }
 
     const primaryModel = "gemini-2.0-flash-exp";
-    const fallbackModel = "gemini-2.5-flash";
+    const fallbackModel = "gemini-2.0-flash";
     const apiKey = process.env.GEMINI_API_KEY || process.env.AI_API_KEY || '';
 
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
@@ -44,7 +44,7 @@ export default async function handler(req, res) {
       Think step-by-step and provide actual insights.`;
 
     async function callGemini(modelName, prompt){
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${process.env.GEMINI_API_KEY}`
+      const url = `https://generativelanguage.googleapis.com/v1/models/${modelName}:generateContent?key=${process.env.GEMINI_API_KEY}`
       const resp = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({contents:[{parts:[{text:prompt}]}]}) })
       const data = await resp.json()
       if(!resp.ok) throw new Error(data.error?.message || 'Gemini error')
