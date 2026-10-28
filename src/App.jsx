@@ -15,6 +15,15 @@ import { startWakeWord, speakRoar } from "./utils/wakeWord.js";
 import AgentDesks from "./pages/AgentDesks.jsx";
 import Mt5Monitor from "./pages/Mt5Monitor.jsx";
 import BrowserOperator from "./pages/BrowserOperator.jsx";
+import HealthPage from "./pages/HealthPage.jsx";
+import {
+  buildDebugPack,
+  buildDebugPackJson,
+  copyText,
+  createUiLogCode,
+  downloadFile,
+  maskSecrets,
+} from "./utils/debugPack.js";
 
 
 /* ==========================================================================
@@ -103,6 +112,7 @@ const GREETING = {
 
 const NAVIGATION = [
   { id: "overview", icon: "◈", label: "Command Center" },
+  { id: "health", icon: "✚", label: "Health" },
   { id: "assistant", icon: "✦", label: "Grandmaster AI" },
   { id: "memory", icon: "◉", label: "Memory" },
   { id: "builder", icon: "⌘", label: "App Builder" },
@@ -270,6 +280,62 @@ const LISTEN_LANGS = [
 
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const nowLabel = () => new Date().toLocaleString();
+const clockLabel = (value) => {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+};
+const shortId = (value) => (typeof value === "string" ? value.slice(0, 8) : "");
+
+function aiStatusPresentation(status) {
+  switch (status) {
+    case "unknown":
+      return { key: "UNKNOWN", label: "NOT CHECKED", type: "" };
+    case "verified":
+      return { key: "VERIFIED", label: "AI READY", type: "green" };
+    case "verifying":
+      return { key: "VERIFYING", label: "VERIFYING", type: "" };
+    case "stale":
+      return { key: "STALE", label: "STALE", type: "gold" };
+    case "quota_exceeded":
+      return { key: "QUOTA", label: "QUOTA EXCEEDED", type: "gold" };
+    case "not_configured":
+      return { key: "NOT_CONFIGURED", label: "NOT CONFIGURED", type: "gold" };
+    case "unverified":
+      return { key: "FAILED", label: "UNVERIFIED", type: "gold" };
+    default:
+      return { key: "FAILED", label: "AI PROBLEM", type: "gold" };
+  }
+}
+
+function storagePresentation(storage) {
+  if (!storage) return { label: "NOT CHECKED", type: "" };
+  if (storage.writable === false) return { label: "DATA REQUIRED", type: "red" };
+  if (storage.durable) return { label: "DURABLE", type: "green" };
+  if (storage.ephemeral) return { label: "EPHEMERAL", type: "gold" };
+  return { label: "MEMORY ONLY", type: "gold" };
+}
+
+function mt5Presentation(status) {
+  switch (status) {
+    case "online":
+      return { label: "ONLINE", type: "green" };
+    case "terminal_disconnected":
+      return { label: "TERMINAL DISCONNECTED", type: "gold" };
+    case "bridge_invalid_response":
+      return { label: "DEGRADED", type: "gold" };
+    case "not_configured":
+      return { label: "NOT CONFIGURED", type: "gold" };
+    case "offline":
+      return { label: "OFFLINE", type: "red" };
+    case "blocked":
+      return { label: "BLOCKED", type: "red" };
+    case "unavailable":
+      return { label: "UNAVAILABLE", type: "red" };
+    default:
+      return { label: "NOT CHECKED", type: "" };
+  }
+}
 
 function loadState() {
   const empty = {
@@ -393,16 +459,53 @@ async function apiRequest(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
       },
     });
     if (!response.ok) {
-      let detail = "";
+      let body = null;
       try {
-        const body = await response.json();
-        detail = body?.error ? `: ${body.error}` : "";
+        body = await response.json();
       } catch {
         /* non-JSON error body */
       }
-      throw new Error(`Request failed (${response.status})${detail}`);
+      const retryAfter = Number(body?.retryAfter);
+      let message = body?.error || "";
+      if (body?.code === "AI_QUOTA_EXCEEDED") {
+        message =
+          Number.isFinite(retryAfter) && retryAfter > 0
+            ? `AI quota/rate limit reach ho gaya hai. ${Math.ceil(retryAfter)} second baad dobara try karein.`
+            : "AI quota/rate limit reach ho gaya hai. Thodi der baad dobara try karein.";
+      } else if (response.status === 429) {
+        message = "Bahut zyada requests ho gayi hain. Thodi der baad dobara try karein.";
+      } else if (response.status === 503) {
+        message = "AI service abhi available nahi hai. Dobara try karein.";
+      }
+      const error = new Error(
+        message || `Request failed (${response.status})`,
+      );
+      error.status = response.status;
+      error.code = body?.code || "";
+      error.requestId = body?.requestId || response.headers.get("x-request-id") || "";
+      throw error;
     }
     return await response.json();
+  } catch (error) {
+    if (error.name === "AbortError")
+      throw new Error("Request timed out. Dobara try karein.");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function probeHealth() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(`${API_BASE}/api/health/readiness`, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => null);
+    return { status: response.status, body };
   } catch (error) {
     if (error.name === "AbortError")
       throw new Error("Request timed out. Dobara try karein.");
@@ -471,7 +574,12 @@ async function askGrandmaster(
     (v) => typeof v === "string" && v.trim(),
   );
   if (!reply) throw new Error("Backend ne koi jawab nahi diya.");
-  return { text: reply, model: data.model || data.primary || "" };
+  return {
+    text: reply,
+    model: data.model || data.primary || "",
+    cached: Boolean(data.cached),
+    requestId: data.requestId || "",
+  };
 }
 
 /* ---------------------------------- hooks --------------------------------- */
@@ -772,6 +880,69 @@ class ErrorBoundary extends Component {
 
 /* ----------------------------------- App ---------------------------------- */
 
+function AuthScreen({ state, error, busy, onSubmit }) {
+  const [password, setPassword] = useState("");
+  const configured = state !== "unconfigured" && state !== "error";
+
+  return (
+    <div className="gm" style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
+      <style>{css}</style>
+      <div className="gm-card" style={{ width: "min(420px, 100%)" }}>
+        <div className="gm-brand" style={{ marginBottom: 18 }}>
+          <div className="gm-logo" aria-hidden="true">G</div>
+          <div>
+            <div className="gm-brand-name">Grandmaster</div>
+            <div className="gm-brand-sub">DIGITAL HUB</div>
+          </div>
+        </div>
+        <div className="gm-card-title">Sign in</div>
+        <p className="gm-muted gm-small">
+          Private APIs require a signed session. The control token stays on the
+          server and is never sent to this page.
+        </p>
+        {state === "checking" ? (
+          <p className="gm-muted">Checking session…</p>
+        ) : configured ? (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (password.trim()) onSubmit(password);
+            }}
+            style={{ display: "grid", gap: 10, marginTop: 14 }}
+          >
+            <label className="gm-muted gm-small" htmlFor="gm-login-password">
+              UI password
+            </label>
+            <input
+              id="gm-login-password"
+              className="gm-field"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              disabled={busy}
+              required
+            />
+            <button className="gm-btn" type="submit" disabled={busy || !password.trim()}>
+              {busy ? "Signing in…" : "Sign in"}
+            </button>
+          </form>
+        ) : null}
+        {error && (
+          <div className="gm-notice danger" role="alert" style={{ marginTop: 14 }}>
+            {error}
+          </div>
+        )}
+        {state === "error" && (
+          <button className="gm-btn" style={{ marginTop: 12 }} onClick={() => window.location.reload()}>
+            Retry
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const saved = useMemo(loadState, []);
   const voice = useVoice({
@@ -781,15 +952,28 @@ function App() {
   });
   const att = useAttachments();
 
-  const [page, setPage] = useState("overview");
+  const initialPage =
+    typeof window !== "undefined" &&
+    window.location.pathname.replace(/\/+$/, "") === "/health"
+      ? "health"
+      : "overview";
+  const [page, setPage] = useState(initialPage);
   const [menuOpen, setMenuOpen] = useState(false);
   const [backend, setBackend] = useState("CHECKING");
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [healthError, setHealthError] = useState("");
-  const [aiStatus, setAiStatus] = useState("UNKNOWN"); // UNKNOWN | VERIFIED | FAILED
+  const [healthData, setHealthData] = useState(null);
+  const [lastChecked, setLastChecked] = useState("");
+  const [aiStatus, setAiStatus] = useState("UNKNOWN");
   const [aiReason, setAiReason] = useState("");
+  const [aiDetail, setAiDetail] = useState(null);
+  const [mt5Status, setMt5Status] = useState(null);
+  const [mt5Checked, setMt5Checked] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [toast, setToast] = useState("");
+  const [authState, setAuthState] = useState("checking");
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
 
   const [agentCode, setAgentCode] = useState(saved.agentCode);
   const [listenLang, setListenLang] = useState("ur-PK");
@@ -814,16 +998,171 @@ function App() {
   const [doctorScan, setDoctorScan] = useState(null);
   const [doctorRunning, setDoctorRunning] = useState(false);
   const [dimaghLogs, setDimaghLogs] = useState([]);
+  const [micInfo, setMicInfo] = useState({
+    supported: null,
+    permission: "",
+    deviceCount: 0,
+    speechSupported: null,
+    secureContext: null,
+    checkedAt: "",
+  });
+  const [debugBusy, setDebugBusy] = useState(false);
+  const [debugInfo, setDebugInfo] = useState(null);
   const [hamzadSaved, setHamzadSaved] = useState(hamzad.getSnapshot().updatedAt ? true : false);
   const [weaknessesInput, setWeaknessesInput] = useState("");
   const [roadmapLocked, setRoadmapLocked] = useState(hamzad.isTarteebLocked());
   const wakeRef = useRef(null);
+  const aiLoggedState = useRef("");
+  const backendLoggedState = useRef("");
 
-  const addDimaghLog = (message) => {
-    const entry = `[Dimagh] ${message}`;
+  const addDimaghLog = (message, level = "info", requestId = "") => {
+    const text = maskSecrets(String(message));
+    const entry = {
+      id: uid(),
+      code: createUiLogCode(),
+      ts: new Date().toISOString(),
+      time: clockLabel(),
+      level,
+      message: text,
+      rootCause:
+        level === "info" || level === "success"
+          ? "No fault recorded."
+          : text || "Unclassified UI event.",
+      requestId,
+    };
     setDimaghLogs((prev) => [entry, ...prev].slice(0, 60));
-    systemDimagh.addLog(message);
+    systemDimagh.addLog(text);
   };
+
+  /* ---- Microphone diagnostics (no permission prompt, read-only) ---- */
+  const probeMic = useCallback(async () => {
+    const speechSupported =
+      typeof window !== "undefined" &&
+      Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices?.enumerateDevices
+    ) {
+      setMicInfo({
+        supported: false,
+        permission: "unsupported",
+        deviceCount: 0,
+        speechSupported,
+        secureContext:
+          typeof window === "undefined" ? null : window.isSecureContext !== false,
+        checkedAt: clockLabel(),
+      });
+      return;
+    }
+    let permission = "unknown";
+    try {
+      if (navigator.permissions?.query) {
+        const status = await navigator.permissions.query({ name: "microphone" });
+        permission = status.state || "unknown";
+      }
+    } catch {
+      permission = "unknown";
+    }
+    let deviceCount = 0;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      deviceCount = devices.filter((device) => device.kind === "audioinput").length;
+    } catch {
+      deviceCount = 0;
+    }
+    setMicInfo({
+      supported: true,
+      permission,
+      deviceCount,
+      speechSupported,
+      secureContext:
+        typeof window.isSecureContext === "boolean" ? window.isSecureContext : true,
+      checkedAt: clockLabel(),
+    });
+  }, []);
+
+  useEffect(() => {
+    void probeMic();
+  }, [probeMic]);
+
+  /* ---- Signed session gate ---- */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/auth/session`, {
+          cache: "no-store",
+        });
+        if (cancelled) return;
+        if (response.ok) {
+          setAuthState("ready");
+          return;
+        }
+        if (response.status === 503) {
+          const body = await response.json().catch(() => null);
+          setAuthError(
+            body?.error ||
+              "UI authentication is not configured on the server (GRANDMASTER_UI_PASSWORD / GRANDMASTER_SESSION_SECRET).",
+          );
+          setAuthState("unconfigured");
+          return;
+        }
+        setAuthState("required");
+      } catch {
+        if (cancelled) return;
+        setAuthError("Backend reachable nahi hai. Server start karke retry karein.");
+        setAuthState("error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const signIn = useCallback(async (password) => {
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const body = await response.json().catch(() => null);
+      if (response.ok) {
+        setAuthState("ready");
+        return true;
+      }
+      if (response.status === 429) {
+        setAuthError("Bahut zyada attempts. Ek minute baad dobara try karein.");
+      } else if (response.status === 503) {
+        setAuthError(body?.error || "UI authentication is not configured.");
+        setAuthState("unconfigured");
+      } else if (response.status === 401) {
+        setAuthError("Password ghalat hai.");
+      } else {
+        setAuthError(body?.error || "Sign in fail ho gaya.");
+      }
+      return false;
+    } catch {
+      setAuthError("Sign in request fail ho gayi. Backend check karein.");
+      return false;
+    } finally {
+      setAuthBusy(false);
+    }
+  }, []);
+
+  const signOut = useCallback(async () => {
+    try {
+      await fetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
+    } catch {}
+    setAuthState("required");
+    setAuthError("");
+    setHealthData(null);
+    setAiDetail(null);
+    setBackend("CHECKING");
+    setAiStatus("UNKNOWN");
+  }, []);
 
   const toggleWake = () => {
     if (isListening) {
@@ -971,12 +1310,40 @@ function App() {
   }, [toast]);
 
   const checkHealth = useCallback(async (force = false) => {
+    const isForce = force === true;
     setRefreshing(true);
+    if (isForce) addDimaghLog("Manual system refresh requested", "info");
     try {
-      const data = await apiRequest("/api/health", { method: "GET" }, 8000);
+      const health = await probeHealth();
       if (!mounted.current) return;
-      setBackend("LIVE");
-      setHealthError("");
+      if (health.status === 401) {
+        setAuthState("required");
+        setAuthError("Session expire ho gaya. Dobara sign in karein.");
+        return;
+      }
+      const data = health.body && typeof health.body === "object" ? health.body : {};
+      setHealthData(data);
+      setLastChecked(clockLabel());
+      // Reachability is what "Backend API" reports. Health can still be
+      // DEGRADED/ERROR (e.g. control token not configured) without the API
+      // being offline, so surface that state separately.
+      setBackend("ONLINE");
+      if (backendLoggedState.current !== "ONLINE") {
+        backendLoggedState.current = "ONLINE";
+        addDimaghLog(
+          `Backend API reachable · health ${data.status || "unknown"}`,
+          "success",
+          data.requestId,
+        );
+      }
+      if (!health.body || health.status >= 400 || data.ok === false) {
+        const reasons = Array.isArray(data.reasonCodes) ? data.reasonCodes.join(", ") : "";
+        setHealthError(
+          `Backend reachable; health reports ${data.status || `HTTP ${health.status}`}${reasons ? ` (${reasons})` : ""}.`,
+        );
+      } else {
+        setHealthError("");
+      }
       const name =
         typeof data?.primary === "string"
           ? data.primary
@@ -990,7 +1357,7 @@ function App() {
         } catch {}
       }
 
-      // Check providers snapshot
+      // Check providers snapshot (cheap, no live provider call)
       try {
         const provData = await apiRequest("/api/ai/providers", { method: "GET" }, 8000);
         if (provData?.providers && Array.isArray(provData.providers)) {
@@ -1004,49 +1371,202 @@ function App() {
         }
       } catch {}
 
+      // Read-only MT5 bridge status, bounded and independent of the AI provider.
+      const mt5Probe = apiRequest("/api/v1/mt5/status", { method: "GET" }, 6000)
+        .then((body) => ({ body }))
+        .catch((error) => ({ error }));
+
       if (data?.aiConfigured === false) {
-        setAiStatus("FAILED");
+        setAiStatus("NOT_CONFIGURED");
+        setAiDetail(null);
         setAiReason("GEMINI_API_KEY server par set nahi hai (.env check karein).");
       } else {
         try {
           const ai = await apiRequest(
-            `/api/ai/status${force === true ? "?force=1" : ""}`,
+            `/api/ai/status${isForce ? "?force=1" : ""}`,
             { method: "GET" },
-            15000,
+            35000,
           );
           if (!mounted.current) return;
-          setAiStatus(ai?.status === "verified" ? "VERIFIED" : "FAILED");
+          const presentation = aiStatusPresentation(ai?.status);
+          setAiDetail(ai);
+          setAiStatus(presentation.key);
           setAiReason(
             ai?.status === "verified" ? "" : ai?.reason || "AI check failed.",
           );
+          if (aiLoggedState.current !== presentation.key) {
+            aiLoggedState.current = presentation.key;
+            const latency =
+              Number.isFinite(Number(ai?.latencyMs)) && ai.latencyMs !== null
+                ? ` · ${ai.latencyMs} ms`
+                : "";
+            addDimaghLog(
+              `AI provider ${presentation.label}${latency}`,
+              presentation.type === "green"
+                ? "success"
+                : presentation.key === "VERIFYING"
+                  ? "info"
+                  : "warn",
+              ai?.requestId || data?.requestId,
+            );
+          }
         } catch (e) {
           if (!mounted.current) return;
           setAiStatus("FAILED");
+          setAiDetail(null);
           setAiReason(`AI status check fail: ${e.message}`);
+          if (aiLoggedState.current !== "FAILED") {
+            aiLoggedState.current = "FAILED";
+            addDimaghLog(`AI status check failed — ${e.message}`, "error", data?.requestId);
+          }
         }
       }
+
+      const mt5Result = await mt5Probe;
+      if (!mounted.current) return;
+      if (mt5Result.error) {
+        setMt5Status({
+          status: "unavailable",
+          message: "MT5 status check failed. Bridge reachable nahi hai.",
+        });
+      } else {
+        setMt5Status(mt5Result.body?.data || mt5Result.body || null);
+      }
+      setMt5Checked(clockLabel());
     } catch (error) {
       if (!mounted.current) return;
       setBackend("OFF");
       setAiStatus("UNKNOWN");
+      setAiDetail(null);
       setAiReason("");
-      setHealthError(
-        error.message?.includes("timed out")
-          ? "Backend request timed out."
-          : "Backend health endpoint unavailable.",
-      );
+      setMt5Status(null);
+      const message = error.message?.includes("timed out")
+        ? "Backend request timed out."
+        : "Backend health endpoint unavailable.";
+      setHealthError(message);
+      if (backendLoggedState.current !== "OFF") {
+        backendLoggedState.current = "OFF";
+        addDimaghLog(message, "error");
+      }
     } finally {
       if (mounted.current) setRefreshing(false);
     }
   }, []);
 
+  async function collectDebugSnapshot() {
+    let diagnostics = null;
+    let serverError = "";
+    try {
+      diagnostics = await apiRequest(
+        "/api/diagnostics?limit=50",
+        { method: "GET" },
+        12000,
+      );
+    } catch (error) {
+      serverError = error?.message || "Diagnostics endpoint unavailable.";
+    }
+    const client = {
+      build: BUILD_INFO,
+      page,
+      backend,
+      healthError,
+      lastChecked,
+      aiStatus,
+      aiDetail,
+      aiReason,
+      aiCheckedAt: aiDetail?.checkedAt ? clockLabel(aiDetail.checkedAt) : lastChecked,
+      mt5: mt5Status,
+      mt5Checked,
+      storage: healthData?.storage || null,
+      mic: micInfo,
+      isListening,
+      doctor: doctorScan,
+      uiLogs: dimaghLogs,
+    };
+    return {
+      diagnostics,
+      serverError,
+      pack: buildDebugPack({ diagnostics, serverError, client }),
+      json: buildDebugPackJson({ diagnostics, serverError, client }),
+    };
+  }
+
+  async function downloadDebugPack(mode) {
+    if (debugBusy) return;
+    setDebugBusy(true);
+    try {
+      const { diagnostics, serverError, pack, json } =
+        await collectDebugSnapshot();
+      const serverLogs = diagnostics?.logs?.length ?? 0;
+      if (mode === "copy") {
+        const ok = await copyText(pack);
+        if (!ok) {
+          addDimaghLog("Debug pack copy blocked by the browser", "error");
+          setToast("Copy block ho gaya — Download .txt try karein.");
+          return;
+        }
+      } else {
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        if (mode === "json") {
+          downloadFile(
+            `grandmaster-debug-${stamp}.json`,
+            JSON.stringify(json, null, 2),
+            "application/json",
+          );
+        } else {
+          downloadFile(`grandmaster-debug-${stamp}.txt`, pack);
+        }
+      }
+      setDebugInfo({
+        at: clockLabel(),
+        mode,
+        serverLogs,
+        uiLogs: dimaghLogs.length,
+        serverOk: !serverError,
+      });
+      addDimaghLog(
+        `${mode === "copy" ? "Debug pack copied" : "Debug pack downloaded"} (${serverLogs} server logs, ${dimaghLogs.length} UI logs)`,
+        serverError ? "warn" : "success",
+      );
+      setToast(
+        mode === "copy"
+          ? "Copy for Claude ready — paste it in the chat."
+          : "Debug pack download shuru ho gaya.",
+      );
+    } catch (error) {
+      addDimaghLog(`Debug pack failed — ${error.message}`, "error");
+      setToast("Debug pack banane mein error aaya.");
+    } finally {
+      setDebugBusy(false);
+    }
+  }
+
   useEffect(() => {
+    if (authState !== "ready") return undefined;
     checkHealth();
     const timer = setInterval(() => {
       if (document.visibilityState === "visible") checkHealth();
     }, 60000);
     return () => clearInterval(timer);
-  }, [checkHealth]);
+  }, [checkHealth, authState]);
+
+  // While the backend warms its provider snapshot, poll cheaply a few times
+  // instead of waiting a full minute or forcing an expensive live call.
+  const aiVerifyAttempts = useRef(0);
+  useEffect(() => {
+    if (authState !== "ready") {
+      aiVerifyAttempts.current = 0;
+      return undefined;
+    }
+    if (aiStatus !== "VERIFYING") {
+      aiVerifyAttempts.current = 0;
+      return undefined;
+    }
+    if (aiVerifyAttempts.current >= 5) return undefined;
+    aiVerifyAttempts.current += 1;
+    const timer = setTimeout(() => checkHealth(false), 7000);
+    return () => clearTimeout(timer);
+  }, [aiStatus, lastChecked, checkHealth, authState]);
 
   function logActivity(message) {
     setActivity((prev) =>
@@ -1057,6 +1577,12 @@ function App() {
   function navigate(id) {
     setPage(id);
     setMenuOpen(false);
+    if (typeof window === "undefined") return;
+    const target = id === "health" ? "/health" : "/";
+    const current = window.location.pathname.replace(/\/+$/, "") || "/";
+    if (current !== target) {
+      window.history.replaceState({}, "", target);
+    }
   }
 
   /* ----- memory ----- */
@@ -1146,9 +1672,20 @@ function App() {
         },
       ]);
       if (voice.autoSpeak) voice.speak(reply.text);
+      addDimaghLog(
+        `Chat answered · ${reply.model || "model unknown"}${reply.cached ? " · cached" : ""}`,
+        "success",
+        reply.requestId,
+      );
     } catch (err) {
-      if (mounted.current)
+      if (mounted.current) {
         setChatError(err.message || "Request fail ho gayi. Dobara try karein.");
+        addDimaghLog(
+          `Chat failed — ${err.message || err.code || "unknown error"}`,
+          "error",
+          err.requestId,
+        );
+      }
     } finally {
       if (mounted.current) setSending(false);
     }
@@ -1224,7 +1761,7 @@ function App() {
     }
   }
 
-  async function copyText(text, setErr) {
+  async function copyWithFeedback(text, setErr) {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
@@ -1309,7 +1846,29 @@ function App() {
   function renderOverview() {
     const currentStep = Math.min(completedCount + 1, 100);
     const pillType =
-      backend === "LIVE" ? "green" : backend === "OFF" ? "red" : "";
+      backend === "ONLINE" ? "green" : backend === "OFF" ? "red" : "";
+    const aiKeyByState = {
+      VERIFIED: "verified",
+      VERIFYING: "verifying",
+      STALE: "stale",
+      QUOTA: "quota_exceeded",
+      NOT_CONFIGURED: "not_configured",
+      FAILED: "unverified",
+    };
+    const aiView = aiStatusPresentation(aiKeyByState[aiStatus]);
+    const storage = healthData?.storage || null;
+    const storageView = storagePresentation(storage);
+    const mt5View = mt5Presentation(mt5Status?.status);
+    const aiCheckedAt = aiDetail?.checkedAt
+      ? clockLabel(aiDetail.checkedAt)
+      : lastChecked;
+    const aiMeta = [
+      aiDetail?.latencyMs != null ? `${aiDetail.latencyMs} ms` : null,
+      aiCheckedAt ? `checked ${aiCheckedAt}` : null,
+      aiDetail?.stale ? "stale" : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
     return (
       <>
         <section className="gm-card gm-wake-section" style={{ marginTop: 16 }}>
@@ -1388,26 +1947,48 @@ function App() {
             <section className="gm-card">
               <SectionHeader
                 title="Dimagh — Live Logs"
-                subtitle="System brain activity"
+                subtitle={
+                  refreshing
+                    ? "Checking system status…"
+                    : `Session activity · ${dimaghLogs.length} event${dimaghLogs.length === 1 ? "" : "s"}`
+                }
               />
-              <div
-                style={{
-                  height: 200,
-                  overflowY: "auto",
-                  border: "1px solid #eee",
-                  borderRadius: 8,
-                  padding: 10,
-                  background: "#fafafa",
-                }}
-              >
+              <div className="gm-log-box" aria-live="polite" role="log">
                 {dimaghLogs.length === 0 ? (
-                  <div className="gm-muted gm-small">Logs yahan aayenge.</div>
+                  <div className="gm-empty-log">
+                    Abhi koi system log nahi hai. Refresh ya kisi action se
+                    events yahan aayenge.
+                  </div>
                 ) : (
-                  dimaghLogs.map((l, i) => (
-                    <div key={i} className="gm-log-row">
-                      [Dimagh] {l}
-                    </div>
-                  ))
+                  dimaghLogs.map((entry, i) => {
+                    const item =
+                      typeof entry === "string"
+                        ? { message: entry, level: "info", time: "" }
+                        : entry;
+                    const level = ["info", "success", "warn", "error"].includes(item.level)
+                      ? item.level
+                      : "info";
+                    return (
+                      <div
+                        key={item.id || `${i}-${item.time}`}
+                        className={`gm-log-row ${level}`}
+                      >
+                        <span className="gm-log-time">{item.time || "—"}</span>
+                        {item.code && (
+                          <span className="gm-log-code" title={`Log ${item.code}`}>
+                            {item.code}
+                          </span>
+                        )}
+                        <span className={`gm-log-level ${level}`}>{level}</span>
+                        <span className="gm-log-msg">{item.message}</span>
+                        {item.requestId && (
+                          <span className="gm-log-req" title={`Request ${item.requestId}`}>
+                            #{shortId(item.requestId)}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </section>
@@ -1519,7 +2100,7 @@ function App() {
             icon="✦"
             title="AI Backend"
             value={backend === "OFF" ? "OFFLINE" : backend}
-            note={backend === "LIVE" ? model : "Actual provider status"}
+            note={backend === "ONLINE" ? model : "Actual provider status"}
           />
         </div>
 
@@ -1585,23 +2166,31 @@ function App() {
           <section className="gm-card">
             <SectionHeader
               title="System Health"
-              subtitle="Live backend connectivity check"
+              subtitle={
+                lastChecked
+                  ? `Last checked ${lastChecked} · refresh runs one live AI check`
+                  : "Checking backend, AI provider, storage and MT5 bridge"
+              }
               action={
                 <button
                   className="gm-btn ghost"
-                  onClick={checkHealth}
+                  onClick={() => checkHealth(true)}
                   disabled={refreshing}
+                  aria-label="Force refresh system health"
                 >
                   {refreshing ? "Checking…" : "↻ Refresh"}
                 </button>
               }
             />
-            <div className="gm-list">
+            <div className="gm-list" aria-live="polite">
               <div className="gm-list-row">
                 <span className="gm-row-icon">⌘</span>
                 <div className="gm-row-main">
                   <div className="gm-row-title">Backend API</div>
-                  <div className="gm-row-sub">/api/health</div>
+                  <div className="gm-row-sub">
+                    /api/health
+                    {healthData?.requestId ? ` · req #${shortId(healthData.requestId)}` : ""}
+                  </div>
                 </div>
                 <StatusPill type={pillType}>{backend}</StatusPill>
               </div>
@@ -1609,34 +2198,47 @@ function App() {
                 <span className="gm-row-icon">✦</span>
                 <div className="gm-row-main">
                   <div className="gm-row-title">AI Provider</div>
-                  <div className="gm-row-sub">{model}</div>
+                  <div className="gm-row-sub">
+                    {aiDetail?.model || model}
+                    {aiMeta ? ` · ${aiMeta}` : ""}
+                  </div>
                 </div>
-                <StatusPill
-                  type={
-                    backend === "OFF"
-                      ? "red"
-                      : aiStatus === "VERIFIED"
-                        ? "green"
-                        : aiStatus === "FAILED"
-                          ? "gold"
-                          : ""
-                  }
-                >
-                  {backend === "OFF"
-                    ? "UNAVAILABLE"
-                    : aiStatus === "VERIFIED"
-                      ? "AI READY"
-                      : aiStatus === "FAILED"
-                        ? "AI PROBLEM"
-                        : "CHECKING"}
+                <StatusPill type={backend === "OFF" ? "red" : aiView.type}>
+                  {backend === "OFF" ? "UNAVAILABLE" : aiView.label}
                 </StatusPill>
+              </div>
+              <div className="gm-list-row">
+                <span className="gm-row-icon">▤</span>
+                <div className="gm-row-main">
+                  <div className="gm-row-title">Storage</div>
+                  <div className="gm-row-sub">
+                    {storage
+                      ? `${storage.mode} · ${storage.writable ? "writable" : "read-only"} · ${healthData?.storageStatus || "unknown"}`
+                      : "Task, memory and audit stores"}
+                  </div>
+                </div>
+                <StatusPill type={storageView.type}>{storageView.label}</StatusPill>
+              </div>
+              <div className="gm-list-row">
+                <span className="gm-row-icon">◫</span>
+                <div className="gm-row-main">
+                  <div className="gm-row-title">MT5 Bridge</div>
+                  <div className="gm-row-sub">
+                    Read-only · {mt5Checked ? `checked ${mt5Checked}` : "not checked"}
+                    {mt5Status?.terminalConnected ? " · terminal connected" : ""}
+                    {mt5Status?.symbolHealth?.available
+                      ? ` · ${mt5Status.symbolHealth.name} ${mt5Status.symbolHealth.bid ?? "?"}/${mt5Status.symbolHealth.ask ?? "?"}${mt5Status.symbolHealth.stale ? " (stale)" : ""}`
+                      : ""}
+                  </div>
+                </div>
+                <StatusPill type={mt5View.type}>{mt5View.label}</StatusPill>
               </div>
               <div className="gm-list-row">
                 <span className="gm-row-icon">⬢</span>
                 <div className="gm-row-main">
                   <div className="gm-row-title">Trading Safety</div>
                   <div className="gm-row-sub">
-                    No live trading initiated by this dashboard
+                    No live trading or money movement from this dashboard
                   </div>
                 </div>
                 <StatusPill type="green">LOCKED</StatusPill>
@@ -1647,13 +2249,85 @@ function App() {
                 {healthError}
               </p>
             )}
-            {aiStatus === "FAILED" && aiReason && (
-              <p className="gm-muted gm-small" style={{ marginTop: 8, color: "var(--red)" }}>
+            {aiStatus !== "VERIFIED" && !aiReason && aiStatus === "VERIFYING" && (
+              <p className="gm-muted gm-small" style={{ marginTop: 8 }}>
+                Provider verification chal rahi hai. Ye ek chhota live check hai,
+                complete hone par status khud update ho jayega.
+              </p>
+            )}
+            {aiStatus !== "VERIFIED" && aiReason && (
+              <p
+                className="gm-muted gm-small"
+                style={{
+                  marginTop: 8,
+                  color: aiStatus === "FAILED" ? "var(--red)" : "var(--gold2)",
+                }}
+              >
                 {aiReason}
+              </p>
+            )}
+            {mt5Status?.message && (
+              <p className="gm-muted gm-small" style={{ marginTop: 8 }}>
+                {mt5Status.message}
               </p>
             )}
           </section>
         </div>
+
+        <section className="gm-card" style={{ marginTop: 16, marginBottom: 20 }}>
+          <SectionHeader
+            title="Debug Pack"
+            subtitle="One paste for an AI assistant: masked logs, service statuses, stack versions and the simulated Doctor state."
+            action={
+              <button
+                className="gm-btn ghost"
+                onClick={() => checkHealth(true)}
+                disabled={refreshing}
+              >
+                {refreshing ? "Checking…" : "↻ Refresh first"}
+              </button>
+            }
+          />
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button
+              className="gm-btn primary"
+              onClick={() => downloadDebugPack("copy")}
+              disabled={debugBusy}
+            >
+              📋 Copy for Claude
+            </button>
+            <button
+              className="gm-btn ghost"
+              onClick={() => downloadDebugPack("txt")}
+              disabled={debugBusy}
+            >
+              ⬇ Download Logs (.txt)
+            </button>
+            <button
+              className="gm-btn ghost"
+              onClick={() => downloadDebugPack("json")}
+              disabled={debugBusy}
+            >
+              ⬇ Download Logs (.json)
+            </button>
+          </div>
+          <p className="gm-muted gm-small" style={{ marginTop: 12, marginBottom: 0 }}>
+            {debugBusy
+              ? "Debug pack collect ho raha hai…"
+              : debugInfo
+                ? `Last ${debugInfo.mode === "copy" ? "copied" : "downloaded"} at ${
+                    debugInfo.at
+                  } · ${debugInfo.serverLogs} server logs · ${debugInfo.uiLogs} UI logs${
+                    debugInfo.serverOk ? "" : " · server diagnostics unavailable"
+                  }`
+                : "Masking ON. API keys, tokens, cookies and long secrets are replaced before anything is copied or saved."}
+          </p>
+          <p className="gm-muted gm-small" style={{ marginBottom: 0 }}>
+            Server logs live in a process-local 500-entry ring buffer, so serverless
+            instances only show their own recent entries. Nothing here is sent
+            anywhere automatically.
+          </p>
+        </section>
 
         <section className="gm-card" style={{ marginBottom: 20 }}>
           <SectionHeader
@@ -1797,10 +2471,10 @@ function App() {
               </button>
               <StatusPill
                 type={
-                  backend === "LIVE" ? "green" : backend === "OFF" ? "red" : ""
+                  backend === "ONLINE" ? "green" : backend === "OFF" ? "red" : ""
                 }
               >
-                {backend === "LIVE"
+                {backend === "ONLINE"
                   ? "CONNECTED"
                   : backend === "OFF"
                     ? "UNAVAILABLE"
@@ -2078,7 +2752,7 @@ function App() {
               }}
             >
               <span className="gm-muted gm-small">
-                {backend === "LIVE"
+                {backend === "ONLINE"
                   ? "Backend reachable"
                   : "Backend connection required"}
               </span>
@@ -2131,7 +2805,7 @@ function App() {
               </div>
               <button
                 className="gm-btn"
-                onClick={() => copyText(generated, setBuildError)}
+                onClick={() => copyWithFeedback(generated, setBuildError)}
               >
                 {copied ? "Copied ✓" : "Copy"}
               </button>
@@ -2578,13 +3252,13 @@ function App() {
   function renderSecurity() {
     const deploymentStatus = {
       label:
-        backend === "LIVE"
+        backend === "ONLINE"
           ? `BACKEND REACHABLE (frontend ${BUILD_INFO.commitSha})`
           : backend === "OFF"
             ? "BACKEND UNREACHABLE"
             : "PROBING BACKEND",
       description:
-        backend === "LIVE"
+        backend === "ONLINE"
           ? `Backend responded to /api/health. This confirms reachability only — not provider verification, integration connectivity or trading capability. Frontend build ${BUILD_INFO.commitSha} at ${new Date(BUILD_INFO.buildTime).toLocaleString()}.`
           : `Frontend build ${BUILD_INFO.commitSha} is active, but /api/health is currently unreachable.`,
     };
@@ -2599,7 +3273,7 @@ function App() {
       [
         "MT5 monitoring",
         "READ ONLY",
-        "Account snapshots come only from a server-side loopback bridge and require the control token. No order, close or withdrawal endpoint exists.",
+        "Account snapshots come only from a server-side loopback bridge and require a signed-in session. No order, close or withdrawal endpoint exists.",
       ],
       [
         "API credentials",
@@ -2608,8 +3282,8 @@ function App() {
       ],
       [
         "Storage Policy",
-        "NO AUTH TOKENS (gm5:*)",
-        "No authentication layer is implemented. The backend control token is server-side only and is never stored in the browser.",
+        "SIGNED SESSION ONLY",
+        "Private APIs require a signed HttpOnly session cookie. The backend control token stays server-side and is never stored in the browser.",
       ],
       [
         "Social publishing",
@@ -2618,7 +3292,7 @@ function App() {
       ],
       [
         "AI provider",
-        backend === "LIVE" ? "BACKEND REACHABLE" : "UNAVAILABLE",
+        backend === "ONLINE" ? "BACKEND REACHABLE" : "UNAVAILABLE",
         aiStatus === "VERIFIED"
           ? `Verified model: ${model}`
           : aiReason || "A health response does not guarantee successful model inference.",
@@ -2676,8 +3350,67 @@ function App() {
     );
   }
 
+  function renderHealth() {
+    const backendType =
+      backend === "ONLINE" ? "green" : backend === "OFF" ? "red" : "";
+    const aiKeyByState = {
+      VERIFIED: "verified",
+      VERIFYING: "verifying",
+      STALE: "stale",
+      QUOTA: "quota_exceeded",
+      NOT_CONFIGURED: "not_configured",
+      FAILED: "unverified",
+    };
+    const aiView =
+      aiStatus === "UNKNOWN"
+        ? aiStatusPresentation("unknown")
+        : aiStatusPresentation(aiKeyByState[aiStatus]);
+    const aiCheckedAt = aiDetail?.checkedAt ? clockLabel(aiDetail.checkedAt) : "";
+
+    return (
+      <HealthPage
+        buildInfo={BUILD_INFO}
+        backend={backend}
+        backendType={backendType}
+        healthData={healthData}
+        healthError={healthError}
+        lastChecked={lastChecked}
+        refreshing={refreshing}
+        onFreshCheck={() => checkHealth(true)}
+        aiStatus={aiStatus}
+        aiView={aiView}
+        aiDetail={aiDetail}
+        aiReason={aiReason}
+        aiCheckedAt={aiCheckedAt}
+        mt5Status={mt5Status}
+        mt5View={mt5Presentation(mt5Status?.status)}
+        mt5Checked={mt5Checked}
+        storage={healthData?.storage || null}
+        storageView={storagePresentation(healthData?.storage || null)}
+        mic={micInfo}
+        isListening={isListening}
+        onRefreshMic={probeMic}
+        doctorScan={doctorScan}
+        doctorRunning={doctorRunning}
+        onRunDoctor={runSystemDoctor}
+      />
+    );
+  }
+
+  if (authState !== "ready") {
+    return (
+      <AuthScreen
+        state={authState}
+        error={authError}
+        busy={authBusy}
+        onSubmit={signIn}
+      />
+    );
+  }
+
   const renderers = {
     overview: renderOverview,
+    health: renderHealth,
     assistant: renderAssistant,
     memory: renderMemory,
     builder: renderBuilder,
@@ -2736,6 +3469,13 @@ function App() {
             ))}
           </nav>
           <div className="gm-sidebar-bottom">
+            <button
+              className="gm-btn"
+              onClick={signOut}
+              style={{ width: "100%", marginBottom: 12 }}
+            >
+              Sign out
+            </button>
             <div className="gm-safety-mini">
               <div className="gm-safety-title">
                 <span>●</span> SAFETY CONTROLS
@@ -2777,7 +3517,15 @@ function App() {
             </div>
             <div className="gm-top-right">
               <div
-                className={`gm-status ${backend === "OFF" ? "off" : aiStatus === "VERIFIED" ? "live" : aiStatus === "FAILED" ? "warn" : ""}`}
+                className={`gm-status ${
+                  backend === "OFF"
+                    ? "off"
+                    : aiStatus === "VERIFIED"
+                      ? "live"
+                      : ["FAILED", "STALE", "QUOTA", "NOT_CONFIGURED"].includes(aiStatus)
+                        ? "warn"
+                        : ""
+                }`}
                 role="status"
               >
                 <span className="gm-dot" />
@@ -2786,17 +3534,25 @@ function App() {
                     ? "Backend offline"
                     : aiStatus === "VERIFIED"
                       ? "AI verified"
-                      : aiStatus === "FAILED"
-                        ? "AI problem"
-                        : "Connecting"}
+                      : aiStatus === "VERIFYING"
+                        ? "AI verifying"
+                        : aiStatus === "STALE"
+                          ? "AI stale"
+                          : aiStatus === "QUOTA"
+                            ? "AI quota exceeded"
+                            : aiStatus === "NOT_CONFIGURED"
+                              ? "AI not configured"
+                              : aiStatus === "FAILED"
+                                ? "AI problem"
+                                : "Connecting"}
                 </span>
               </div>
               <button
                 className="gm-icon-btn"
-                onClick={checkHealth}
+                onClick={() => checkHealth(true)}
                 disabled={refreshing}
-                title="Refresh backend status"
-                aria-label="Refresh backend status"
+                title="Force refresh system status"
+                aria-label="Force refresh system status"
               >
                 {refreshing ? "…" : "↻"}
               </button>
@@ -2907,6 +3663,18 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .gm-pill.green{color:var(--green);background:#40d6a00d;border-color:#40d6a02b}
 .gm-pill.gold{color:var(--gold2);background:#f5bc4b0d;border-color:#f5bc4b2b}
 .gm-pill.red{color:var(--red);background:#ff737d0d;border-color:#ff737d2b}
+.gm-log-box{height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:10px;padding:8px;background:#090c14;display:flex;flex-direction:column;gap:3px;scrollbar-width:thin}
+.gm-empty-log{padding:18px 12px;color:var(--muted);font-size:11px;text-align:center;line-height:1.6}
+.gm-log-row{display:flex;align-items:baseline;gap:8px;padding:5px 6px;border-radius:6px;border-bottom:1px solid #ffffff08;font-size:10px;line-height:1.5}
+.gm-log-row:last-child{border-bottom:0}
+.gm-log-time{flex:0 0 auto;color:var(--muted);font-variant-numeric:tabular-nums;font-size:9px}
+.gm-log-level{flex:0 0 auto;display:inline-block;min-width:46px;text-align:center;border-radius:4px;padding:1px 4px;font-size:8px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;background:#ffffff08;color:var(--muted)}
+.gm-log-level.success{color:var(--green);background:#40d6a012}
+.gm-log-level.warn{color:var(--gold2);background:#f5bc4b12}
+.gm-log-level.error{color:var(--red);background:#ff737d12}
+.gm-log-code{flex:0 0 auto;color:var(--gold2);font-size:8px;font-family:ui-monospace,SFMono-Regular,monospace;opacity:.85}
+.gm-log-msg{flex:1;min-width:0;overflow-wrap:anywhere}
+.gm-log-req{flex:0 0 auto;color:var(--muted);font-size:9px;font-family:ui-monospace,SFMono-Regular,monospace}
 .gm-progress{height:6px;background:#ffffff0c;border-radius:99px;overflow:hidden}
 .gm-progress-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,var(--gold),var(--gold2));transition:width .3s}
 .gm-quick-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}

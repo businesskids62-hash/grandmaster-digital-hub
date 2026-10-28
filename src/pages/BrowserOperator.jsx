@@ -13,13 +13,12 @@ class ApiError extends Error {
 async function operatorRequest(
   apiBase,
   path,
-  { method = "GET", operatorToken = "", controlToken = "", body } = {},
+  { method = "GET", operatorToken = "", body } = {},
 ) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30_000);
   const headers = {};
   if (operatorToken) headers["X-Grandmaster-Operator-Token"] = operatorToken;
-  if (controlToken) headers["X-Grandmaster-Token"] = controlToken;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   try {
     const response = await fetch(`${apiBase}/api/v1${path}`, {
@@ -162,7 +161,6 @@ export default function BrowserOperator({ apiBase = "" }) {
   const [statusNotice, setStatusNotice] = useState("");
   const [statusActionError, setStatusActionError] = useState(null);
   const [operatorToken, setOperatorToken] = useState("");
-  const [controlToken, setControlToken] = useState("");
   const [session, setSession] = useState(null);
   const [sessionBusy, setSessionBusy] = useState(false);
   const [snapshot, setSnapshot] = useState(null);
@@ -482,7 +480,7 @@ export default function BrowserOperator({ apiBase = "" }) {
       setUrl("");
       setConfirmation("");
       setNotice(
-        "Plan freeze ho gaya. Exact hash verify karein, phir control token aur typed APPROVE ke saath approve karein.",
+        "Plan freeze ho gaya. Exact hash verify karein, phir typed APPROVE ke saath approve karein.",
       );
     } catch (e) {
       if (!mounted.current) return;
@@ -501,16 +499,11 @@ export default function BrowserOperator({ apiBase = "" }) {
       setNotice("Approval ke liye exactly APPROVE type karein.");
       return;
     }
-    if (!controlToken.trim()) {
-      setNotice("Control token zaroori hai. Operator token approval ke liye kaafi nahi.");
-      return;
-    }
     setRunBusy(true);
     try {
       const data = await operatorRequest(apiBase, `/operator/runs/${run.id}/approve`, {
         method: "POST",
         operatorToken: operatorToken.trim(),
-        controlToken: controlToken.trim(),
         body: { planHash: run.planHash, confirmation },
       });
       if (!mounted.current) return;
@@ -603,7 +596,9 @@ export default function BrowserOperator({ apiBase = "" }) {
         <code>GRANDMASTER_OPERATOR_REAL_TEST=1 npm run test:operator:real</code>{" "}
         chalayein. Jab tak real connector test pass nahi hota, status{" "}
         <strong>NOT CONNECTED</strong> rahega aur session start nahi hoga.
-        Har plan ke liye control token aur typed <code>APPROVE</code> zaroori hai.
+        Har plan ke liye operator token aur typed <code>APPROVE</code> zaroori hai.
+        Approval authority server-side control token se aati hai (signed session ke
+        baad inject hoti hai, browser ko kabhi nahi milti).
         CAPTCHA ya login wall par automation khud ruk jata hai — wahan kaam manually
         karein.
       </div>
@@ -756,22 +751,11 @@ export default function BrowserOperator({ apiBase = "" }) {
 
         <div className="gmop-session-grid">
           <div>
-            <label className="gmop-label" htmlFor="gmop-control-token">
-              Control token (approval only)
-            </label>
-            <input
-              id="gmop-control-token"
-              className="gm-field"
-              type="password"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="Separate approval authority"
-              value={controlToken}
-              onChange={(event) => setControlToken(event.target.value)}
-            />
+            <span className="gmop-label">Approval authority</span>
             <p className="gm-muted gm-small" style={{ margin: "6px 0 0" }}>
-              Operator token session chalata hai; control token sirf plan approve
-              karta hai. Ek token doosre ki jagah nahi le sakta.
+              Operator token session chalata hai. Approval authority signed session
+              ke baad server par control token se aati hai; browser ko control
+              token kabhi nahi milta. Ek token doosre ki jagah nahi le sakta.
             </p>
           </div>
           <div className="gmop-session-actions">
@@ -1121,10 +1105,11 @@ export default function BrowserOperator({ apiBase = "" }) {
           </div>
 
           <div className="gm-notice">
-            <strong>Approval authority:</strong> operator token + control token dono
-            chahiye aur typed <code>APPROVE</code> zaroori hai. Irreversible,
-            destructive aur financial actions is system mein eligible hi nahi —
-            woh planning stage par LOCKED hain.
+            <strong>Approval authority:</strong> operator token aur typed{" "}
+            <code>APPROVE</code> zaroori hain; server-side control token signed
+            session ke baad inject hota hai. Irreversible, destructive aur
+            financial actions is system mein eligible hi nahi — woh planning stage
+            par LOCKED hain.
           </div>
 
           {run.status === "AWAITING_APPROVAL" && (
@@ -1149,15 +1134,13 @@ export default function BrowserOperator({ apiBase = "" }) {
                   type="submit"
                   className="gm-btn primary"
                   disabled={
-                    runBusy || confirmation !== "APPROVE" || !controlToken.trim() || !operatorToken.trim()
+                    runBusy || confirmation !== "APPROVE" || !operatorToken.trim()
                   }
                 >
                   {runBusy ? "Approving…" : "Approve frozen plan"}
                 </button>
                 <span className="gm-muted gm-small">
-                  {controlToken.trim()
-                    ? "Control token present (memory only)"
-                    : "Control token required for approval"}
+                  Approval authority is applied server-side from the signed session.
                 </span>
               </div>
             </form>

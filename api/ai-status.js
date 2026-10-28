@@ -1,16 +1,18 @@
 import { getProviderStatusList, parseProviders } from "../lib/aiProviders.js";
-import { prepare, sendJson } from "../lib/vercelHttp.js";
+import { prepare, requireSession, sendJson } from "../lib/vercelHttp.js";
 
 // Legacy endpoint kept for compatibility.
 // It reports configuration only; it never claims the backend or AI is verified.
 export default async function handler(req, res) {
-  prepare(req, res, process.env);
+  const { requestId } = prepare(req, res, process.env);
   if (res.writableEnded) return;
 
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.setHeader("Allow", "GET, HEAD");
-    return res.status(405).json({ error: "Method not allowed. Use GET." });
+    return res.status(405).json({ error: "Method not allowed. Use GET.", requestId });
   }
+
+  if (!requireSession(req, res, process.env, requestId)) return;
 
   const statuses = getProviderStatusList(process.env);
   const [provider, model] = (parseProviders(process.env)[0] || "").split(":");

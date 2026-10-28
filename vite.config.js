@@ -1,8 +1,9 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
-import fs from "node:fs";
-import path from "node:path";
 import { execSync } from "node:child_process";
+
+const DEFAULT_API_TARGET = "http://127.0.0.1:8000";
+const DEV_PORT = 5174;
 
 function getCommitSha() {
   if (process.env.VERCEL_GIT_COMMIT_SHA) {
@@ -15,21 +16,10 @@ function getCommitSha() {
   }
 }
 
-function getServerPort() {
-  try {
-    const serverEnvPath = path.resolve(process.cwd(), "server/.env");
-    if (fs.existsSync(serverEnvPath)) {
-      const content = fs.readFileSync(serverEnvPath, "utf-8");
-      const match = content.match(/^PORT\s*=\s*(\d+)/m);
-      if (match && match[1]) return Number(match[1]);
-    }
-  } catch {}
-  return Number(process.env.PORT) || 5000;
-}
-
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const serverPort = getServerPort();
+  // 127.0.0.1 avoids the Windows localhost -> ::1 resolution mismatch.
+  const apiTarget = process.env.VITE_API_TARGET || env.VITE_API_TARGET || DEFAULT_API_TARGET;
   const commitSha = getCommitSha();
   const buildTime = new Date().toISOString();
 
@@ -42,9 +32,11 @@ export default defineConfig(({ mode }) => {
       }),
     },
     server: {
+      port: DEV_PORT,
+      strictPort: true,
       proxy: {
         "/api": {
-          target: env.VITE_API_URL || `http://localhost:${serverPort}`,
+          target: apiTarget,
           changeOrigin: true,
         },
       },

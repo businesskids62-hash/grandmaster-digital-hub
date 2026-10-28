@@ -53,7 +53,7 @@ class ApiError extends Error {
   }
 }
 
-async function request(apiBase, path, { method = "GET", body, token } = {}) {
+async function request(apiBase, path, { method = "GET", body } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30_000);
   try {
@@ -62,7 +62,6 @@ async function request(apiBase, path, { method = "GET", body, token } = {}) {
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
-        ...(token ? { "X-Grandmaster-Token": token } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -115,14 +114,14 @@ function statusTone(status) {
 
 function protectedAuthFailure(error) {
   const suffix = error?.requestId ? ` (request ${error.requestId})` : "";
-  if (error?.code === "INVALID_CONTROL_TOKEN") {
-    return `Tasks and notifications are locked: the control token was rejected. Check the token and retry.${suffix}`;
+  if (error?.code === "AUTH_REQUIRED") {
+    return `Session expire ho gaya. Dobara sign in karein.${suffix}`;
+  }
+  if (error?.code === "INVALID_CONTROL_TOKEN" || error?.code === "APPROVAL_REQUIRED") {
+    return `Tasks and notifications are locked: the server could not authorize this session. Sign in again.${suffix}`;
   }
   if (error?.code === "APPROVAL_AUTHORITY_NOT_CONFIGURED") {
     return `Tasks and notifications are locked: the server has no control authority configured.${suffix}`;
-  }
-  if (error?.code === "APPROVAL_REQUIRED") {
-    return `Tasks and notifications are locked: enter the control token to load them.${suffix}`;
   }
   return "";
 }
@@ -153,7 +152,6 @@ export default function AgentDesks({ apiBase = "" }) {
   const [memoryLoaded, setMemoryLoaded] = useState(false);
   const [memoryAuthError, setMemoryAuthError] = useState("");
   const [taskAuthError, setTaskAuthError] = useState("");
-  const [token, setToken] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -162,8 +160,7 @@ export default function AgentDesks({ apiBase = "" }) {
 
   const controlReady = Boolean(status?.controlAuthorityConfigured);
 
-  const loadCore = useCallback(async (authToken = "") => {
-    const auth = String(authToken || "").trim();
+  const loadCore = useCallback(async () => {
     setLoading(true);
     setError("");
     setTaskAuthError("");
@@ -186,13 +183,9 @@ export default function AgentDesks({ apiBase = "" }) {
       ["agents", request(apiBase, "/agents")],
       ["integrations", request(apiBase, "/integrations")],
       ["security posture", request(apiBase, "/security/posture")],
+      ["tasks", request(apiBase, "/tasks?limit=50")],
+      ["notifications", request(apiBase, "/notifications")],
     ];
-    if (auth) {
-      requests.push(
-        ["tasks", request(apiBase, "/tasks?limit=50", { token: auth })],
-        ["notifications", request(apiBase, "/notifications", { token: auth })],
-      );
-    }
 
     const settled = await Promise.allSettled(requests.map(([, promise]) => promise));
     const results = Object.fromEntries(
@@ -221,7 +214,7 @@ export default function AgentDesks({ apiBase = "" }) {
     if (tasksResult?.status === "fulfilled") {
       setTasks(tasksResult.value.tasks || []);
       setTaskStats(tasksResult.value.stats || null);
-    } else if (auth) {
+    } else {
       setTasks([]);
       setTaskStats(null);
     }
@@ -229,7 +222,7 @@ export default function AgentDesks({ apiBase = "" }) {
     const notificationsResult = results.notifications;
     if (notificationsResult?.status === "fulfilled") {
       setChannels(notificationsResult.value.channels || []);
-    } else if (auth) {
+    } else {
       setChannels([]);
     }
 
@@ -260,7 +253,7 @@ export default function AgentDesks({ apiBase = "" }) {
   }, [apiBase]);
 
   useEffect(() => {
-    loadCore("");
+    loadCore();
   }, [loadCore]);
 
   const showError = (e) => {
@@ -269,40 +262,27 @@ export default function AgentDesks({ apiBase = "" }) {
     setError(`${e?.message || "Request failed."}${suffix}`);
   };
 
-  const requireToken = () => {
-    if (token.trim()) return true;
-    setError("");
-    setNotice("Control authorization required. Enter the server-side control token first.");
-    return false;
-  };
-
   const memoryAuthFailure = (e) => {
     const suffix = e?.requestId ? ` (request ${e.requestId})` : "";
-    if (e.code === "INVALID_CONTROL_TOKEN") {
-      return `Memory is locked: the control token was rejected. Check the token and try again.${suffix}`;
+    if (e.code === "INVALID_CONTROL_TOKEN" || e.code === "APPROVAL_REQUIRED") {
+      return `Memory is locked: the server could not authorize this session. Sign in again.${suffix}`;
     }
     if (e.code === "APPROVAL_AUTHORITY_NOT_CONFIGURED") {
       return `Memory is locked: the server has no control authority configured.${suffix}`;
     }
-    if (e.code === "APPROVAL_REQUIRED") {
-      return `Memory is locked: enter the control token to load stored memories.${suffix}`;
+    if (e.code === "AUTH_REQUIRED") {
+      return `Session expire ho gaya. Dobara sign in karein.${suffix}`;
     }
     return "";
   };
 
   const loadMemories = useCallback(
-    async (authToken = token, { silent = false } = {}) => {
-      const auth = String(authToken || "").trim();
-      if (!auth) {
-        setMemoryAuthError("");
-        setNotice("Enter the control token to load server memory.");
-        return false;
-      }
+    async ({ silent = false } = {}) => {
       setBusy("memory-list");
       setError("");
       setMemoryAuthError("");
       try {
-        const data = await request(apiBase, "/memory?limit=50", { token: auth });
+        const data = await request(apiBase, "/memory?limit=50");
         setMemories(data.memories || []);
         if (Array.isArray(data.categories) && data.categories.length) {
           setMemoryCategories(data.categories);
@@ -323,7 +303,7 @@ export default function AgentDesks({ apiBase = "" }) {
         setBusy("");
       }
     },
-    [apiBase, token],
+    [apiBase],
   );
 
   async function openAgent(agentId) {
@@ -341,10 +321,7 @@ export default function AgentDesks({ apiBase = "" }) {
   }
 
   async function refreshTasks() {
-    if (!requireToken()) return false;
-    const data = await request(apiBase, "/tasks?limit=50", {
-      token: token.trim(),
-    });
+    const data = await request(apiBase, "/tasks?limit=50");
     setTasks(data.tasks || []);
     setTaskStats(data.stats || null);
     setTaskAuthError("");
@@ -354,7 +331,6 @@ export default function AgentDesks({ apiBase = "" }) {
   async function submitTask(event) {
     event.preventDefault();
     if (!taskRequest.trim()) return;
-    if (!requireToken()) return;
     setBusy("create-task");
     setError("");
     setNotice("");
@@ -363,7 +339,6 @@ export default function AgentDesks({ apiBase = "" }) {
     try {
       const data = await request(apiBase, "/tasks", {
         method: "POST",
-        token: token.trim(),
         body: {
           request: taskRequest.trim(),
           agentId: taskAgent || undefined,
@@ -379,7 +354,7 @@ export default function AgentDesks({ apiBase = "" }) {
           : `Task finished with status ${data.task?.status || "unknown"}.`,
       );
       await refreshTasks();
-      await loadCore(token);
+      await loadCore();
     } catch (e) {
       if (e.code === "ACTION_LOCKED") {
         setNotice("LOCKED by policy. No task was created and no financial action was performed.");
@@ -419,14 +394,12 @@ export default function AgentDesks({ apiBase = "" }) {
   }
 
   async function taskAction(taskId, action) {
-    if (!requireToken()) return;
     setBusy(`${action}-${taskId}`);
     setError("");
     setNotice("");
     try {
       const data = await request(apiBase, `/tasks/${taskId}/${action}`, {
         method: "POST",
-        token: token.trim(),
       });
       const updated = data.task;
       setLastTask(updated || null);
@@ -437,7 +410,7 @@ export default function AgentDesks({ apiBase = "" }) {
           : `Task is now ${updated?.status || "updated"}.`,
       );
       await refreshTasks();
-      await loadCore(token);
+      await loadCore();
     } catch (e) {
       const authMessage = protectedAuthFailure(e);
       if (authMessage) {
@@ -453,7 +426,6 @@ export default function AgentDesks({ apiBase = "" }) {
 
   async function searchMemory(event) {
     event.preventDefault();
-    if (!requireToken()) return;
     setBusy("memory-search");
     setError("");
     setMemoryAuthError("");
@@ -461,9 +433,7 @@ export default function AgentDesks({ apiBase = "" }) {
       const params = new URLSearchParams({ limit: "50" });
       if (memoryQuery.trim()) params.set("q", memoryQuery.trim());
       if (memoryCategory) params.set("category", memoryCategory);
-      const data = await request(apiBase, `/memory?${params.toString()}`, {
-        token: token.trim(),
-      });
+      const data = await request(apiBase, `/memory?${params.toString()}`);
       setMemories(data.memories || []);
       if (Array.isArray(data.categories) && data.categories.length) {
         setMemoryCategories(data.categories);
@@ -485,7 +455,6 @@ export default function AgentDesks({ apiBase = "" }) {
 
   async function addMemory(event) {
     event.preventDefault();
-    if (!requireToken()) return;
     setBusy("memory-create");
     setError("");
     setNotice("");
@@ -493,14 +462,11 @@ export default function AgentDesks({ apiBase = "" }) {
     try {
       await request(apiBase, "/memory", {
         method: "POST",
-        token: token.trim(),
         body: { text: memoryText.trim(), category: memoryNewCategory },
       });
       setMemoryText("");
       setNotice("Memory stored on the server.");
-      const data = await request(apiBase, "/memory?limit=50", {
-        token: token.trim(),
-      });
+      const data = await request(apiBase, "/memory?limit=50");
       setMemories(data.memories || []);
       if (Array.isArray(data.categories) && data.categories.length) {
         setMemoryCategories(data.categories);
@@ -520,14 +486,12 @@ export default function AgentDesks({ apiBase = "" }) {
   }
 
   async function removeMemory(id) {
-    if (!requireToken()) return;
     setBusy(`memory-delete-${id}`);
     setError("");
     setNotice("");
     try {
       await request(apiBase, `/memory/${id}`, {
         method: "DELETE",
-        token: token.trim(),
       });
       setMemories((current) => current.filter((item) => item.id !== id));
       setNotice("Memory deleted.");
@@ -544,16 +508,14 @@ export default function AgentDesks({ apiBase = "" }) {
   }
 
   async function testIntegration(id) {
-    if (!requireToken()) return;
     setBusy(`integration-${id}`);
     setError("");
     try {
       const data = await request(apiBase, `/integrations/${id}/test`, {
         method: "POST",
-        token: token.trim(),
       });
       setIntegrationResults((current) => ({ ...current, [id]: data }));
-      if (id === "ai_provider") await loadCore(token);
+      if (id === "ai_provider") await loadCore();
     } catch (e) {
       const authMessage = protectedAuthFailure(e);
       if (authMessage) {
@@ -568,14 +530,12 @@ export default function AgentDesks({ apiBase = "" }) {
   }
 
   async function loadAudit() {
-    if (!requireToken()) return;
     setBusy("audit");
     setError("");
     setNotice("");
     try {
       const data = await request(apiBase, "/audit?limit=100", {
         method: "GET",
-        token: token.trim(),
       });
       setAudit(data);
     } catch (e) {
@@ -636,7 +596,7 @@ export default function AgentDesks({ apiBase = "" }) {
           <button
             type="button"
             className="gm-btn"
-            onClick={() => loadCore(token)}
+            onClick={() => loadCore()}
             disabled={loading}
           >
             {loading ? "Refreshing…" : "↻ Refresh"}
@@ -686,37 +646,12 @@ export default function AgentDesks({ apiBase = "" }) {
       )}
 
       <div className="desk-token-row">
-        <label className="desk-token-label" htmlFor="gm-control-token">
-          Control token
-        </label>
-        <input
-          id="gm-control-token"
-          className="gm-field desk-token-input"
-          type="password"
-          autoComplete="new-password"
-          placeholder="Server-side GRANDMASTER_CONTROL_TOKEN"
-          value={token}
-          onChange={(event) => {
-            const next = event.target.value;
-            setToken(next);
-            setTasks([]);
-            setTaskStats(null);
-            setChannels([]);
-            setAudit(null);
-            setMemories([]);
-            setMemoryLoaded(false);
-            setMemoryAuthError("");
-            setTaskAuthError("");
-          }}
-        />
+        <Pill tone="green">SIGNED SESSION</Pill>
         <span className="gm-muted gm-small">
-          Enter the token, then select Refresh to load protected tasks and
-          notifications. Held in component memory only. Never written to
-          localStorage or sessionStorage.
+          Approvals, memory and audit use the signed HttpOnly session cookie set
+          at sign-in. The control token stays server-side and is never entered
+          or stored in this page.
         </span>
-        <Pill tone={token.trim() ? "gold" : ""}>
-          {token.trim() ? "TOKEN ENTERED" : "NO TOKEN"}
-        </Pill>
       </div>
 
       <div className="desk-tabs" role="tablist" aria-label="Agent operations">
@@ -751,7 +686,7 @@ export default function AgentDesks({ apiBase = "" }) {
           <button
             type="button"
             className="gm-btn"
-            onClick={() => loadCore(token)}
+            onClick={() => loadCore()}
             disabled={loading}
           >
             {loading ? "Retrying…" : "Retry"}
@@ -1042,13 +977,7 @@ export default function AgentDesks({ apiBase = "" }) {
                 {approvalInbox.length} WAITING
               </Pill>
             </div>
-            {!token.trim() && (
-              <div className="gm-muted gm-small">
-                Enter the control token and select Refresh tasks to load the
-                approval inbox.
-              </div>
-            )}
-            {token.trim() && !approvalInbox.length && (
+            {!approvalInbox.length && (
               <div className="gm-muted gm-small">
                 No tasks are waiting for approval.
               </div>
@@ -1188,10 +1117,8 @@ export default function AgentDesks({ apiBase = "" }) {
             {!tasks.length && !loading && (
               <div className="gm-empty">
                 {taskAuthError
-                  ? "Tasks are locked. Enter a valid control token and select Refresh."
-                  : token.trim()
-                    ? "No tasks recorded yet."
-                    : "Enter the control token to load tasks and notifications."}
+                  ? "Tasks are locked. Sign in again and select Refresh."
+                  : "No tasks recorded yet."}
               </div>
             )}
             {tasks.map((task) => {
@@ -1312,7 +1239,7 @@ export default function AgentDesks({ apiBase = "" }) {
               <h2>Persistent memory</h2>
               <p>
                 Stored by the backend. Secrets are rejected. Listing, search,
-                create, update and delete all require the control token.
+                create, update and delete require a signed-in session.
               </p>
             </div>
             {status?.storage?.memory && (
@@ -1326,12 +1253,6 @@ export default function AgentDesks({ apiBase = "" }) {
             )}
           </div>
 
-          {!token.trim() && (
-            <div className="gm-notice" style={{ marginBottom: 14 }}>
-              Server memory is protected. Enter the control token above, then
-              select <strong>Load memories</strong> or search.
-            </div>
-          )}
           {memoryAuthError && (
             <div
               className="gm-notice danger"
@@ -1405,14 +1326,14 @@ export default function AgentDesks({ apiBase = "" }) {
               type="button"
               className="gm-btn"
               onClick={() => loadMemories()}
-              disabled={!token.trim() || busy === "memory-list"}
+              disabled={busy === "memory-list"}
             >
               {busy === "memory-list" ? "Loading…" : "Load memories"}
             </button>
             <button
               type="submit"
               className="gm-btn"
-              disabled={!token.trim() || busy === "memory-search"}
+              disabled={busy === "memory-search"}
             >
               Search
             </button>
@@ -1423,9 +1344,7 @@ export default function AgentDesks({ apiBase = "" }) {
               <div className="gm-empty">
                 {memoryLoaded
                   ? "No memories stored."
-                  : token.trim()
-                    ? "Memory list not loaded. Select Load memories."
-                    : "Enter the control token to load server memory."}
+                  : "Memory list not loaded. Select Load memories."}
               </div>
             )}
             {memories.map((memory) => (
@@ -1565,7 +1484,7 @@ export default function AgentDesks({ apiBase = "" }) {
               <h2>Security posture & audit</h2>
               <p>
                 Policy controls are enforced on the server, not by hidden buttons.
-                Audit access requires the control token.
+                Audit access requires a signed-in session.
               </p>
             </div>
           </div>
@@ -1612,7 +1531,7 @@ export default function AgentDesks({ apiBase = "" }) {
 
             {!audit && (
               <div className="gm-muted gm-small">
-                Enter the control token and load the audit trail.
+                Load the audit trail to view sanitized server-side events.
               </div>
             )}
 

@@ -1,20 +1,20 @@
 import {
   checkHealthRateLimit,
-  createHealthReport,
+  createLivenessReport,
   healthRateLimitHeaders,
 } from "../lib/healthStatus.js";
 import { prepare, sendJson } from "../lib/vercelHttp.js";
 
-// Public health endpoint. Never reveals secrets, environment variables or paths.
-// It returns GREEN only for verified core + provider state, DEGRADED when a
-// non-critical dependency is unavailable, and ERROR (503) when core checks fail.
+// Public liveness endpoint. It only proves the process responds and never
+// implies the AI provider, storage, MT5 or the control authority work.
+// Private readiness lives at /api/health/readiness (session required).
 export default async function handler(req, res) {
-  const { clientKey } = prepare(req, res, process.env);
+  const { clientKey, requestId } = prepare(req, res, process.env);
   if (res.writableEnded) return;
 
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.setHeader("Allow", "GET, HEAD");
-    return res.status(405).json({ error: "Method not allowed. Use GET." });
+    return res.status(405).json({ error: "Method not allowed. Use GET.", requestId });
   }
 
   const rate = checkHealthRateLimit(clientKey, process.env);
@@ -28,11 +28,17 @@ export default async function handler(req, res) {
         ok: false,
         error: "Too many health requests. Try again in a minute.",
         code: "HEALTH_RATE_LIMITED",
+        requestId,
       },
       rateHeaders,
     );
   }
 
-  const report = createHealthReport({ env: process.env });
-  return sendJson(res, report.statusCode, report.body, rateHeaders);
+  const report = createLivenessReport();
+  return sendJson(
+    res,
+    report.statusCode,
+    { ...report.body, requestId },
+    rateHeaders,
+  );
 }

@@ -95,13 +95,21 @@ function snapshotError(error) {
 }
 
 const BRIDGE_TONE = {
+  online: "green",
+  terminal_disconnected: "gold",
   configured_unverified: "gold",
+  offline: "red",
+  bridge_invalid_response: "red",
   blocked: "red",
   not_connected: "red",
 };
 
 const BRIDGE_LABEL = {
+  online: "BRIDGE: ONLINE",
+  terminal_disconnected: "BRIDGE: ONLINE · TERMINAL DISCONNECTED",
   configured_unverified: "BRIDGE: CONFIGURED · NOT VERIFIED",
+  offline: "BRIDGE: OFFLINE",
+  bridge_invalid_response: "BRIDGE: INVALID RESPONSE",
   blocked: "BRIDGE: BLOCKED BY POLICY",
   not_connected: "BRIDGE: NOT CONFIGURED",
 };
@@ -228,9 +236,27 @@ export default function Mt5Monitor({ apiBase = "" }) {
           <Pill tone={status?.configured ? "gold" : "red"}>
             CONFIGURED: {status?.configured ? "YES" : "NO"}
           </Pill>
+          {status?.configured && (
+            <Pill tone={status.reachable ? "green" : "red"}>
+              REACHABLE: {status.reachable ? "YES" : "NO"}
+            </Pill>
+          )}
           {status?.reasonCode && <Pill tone="gold">{status.reasonCode}</Pill>}
         </div>
         {statusError && <div className="gm-notice danger">{statusError}</div>}
+        {status?.status === "offline" && (
+          <div className="gm-notice danger">
+            <strong>BRIDGE: OFFLINE.</strong> The configured bridge did not answer. Start it with{" "}
+            <code>npm run dev:mt5</code> or check the loopback port. The page stays read-only and
+            no account data is shown.
+          </div>
+        )}
+        {status?.status === "not_connected" && (
+          <div className="gm-notice danger">
+            <strong>BRIDGE: NOT CONFIGURED.</strong> Set <code>MT5_BRIDGE_URL</code> to the
+            loopback bridge URL on the server.
+          </div>
+        )}
         {status?.message && (
           <p className="gm-muted gm-small" style={{ marginBottom: 0 }}>
             {status.message}
@@ -288,8 +314,11 @@ export default function Mt5Monitor({ apiBase = "" }) {
 
           {!snapshot.connected && (
             <div className="gm-notice">
-              The bridge responded without a connected terminal. No account or
-              position data was returned.
+              The bridge responded without a connected terminal
+              {snapshot.terminalReason
+                ? ` (${String(snapshot.terminalReason).replace(/_/g, " ")})`
+                : ""}
+              . No account or position data was returned.
             </div>
           )}
 

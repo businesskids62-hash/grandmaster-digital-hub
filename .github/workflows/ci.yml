@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: "true"
+      # Test-only values: no real provider key is used in CI.
+      GRANDMASTER_UI_PASSWORD: "ci-ui-password-123"
+      GRANDMASTER_SESSION_SECRET: "ci-session-secret-0123456789abcdef0123456789"
+      GRANDMASTER_CONTROL_TOKEN: "ci-control-token-0123456789abcdef"
+      GEMINI_API_KEY: ""
+      AI_API_KEY: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run build

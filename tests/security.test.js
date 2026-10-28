@@ -7,10 +7,16 @@ import path from "node:path";
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "grandmaster-security-"));
 process.env.GRANDMASTER_DATA_DIR = dataDir;
 process.env.GRANDMASTER_CONTROL_TOKEN = "security-control-token-1234567890";
+process.env.GRANDMASTER_UI_PASSWORD = "security-ui-password-123";
+process.env.GRANDMASTER_SESSION_SECRET =
+  "security-session-secret-0123456789abcdef0123456789";
+process.env.AUTH_RATE_LIMIT_PER_MINUTE = "100";
 process.env.GRANDMASTER_LOG_SILENT = "1";
 process.env.GRANDMASTER_RATE_LIMIT_PER_MINUTE = "1000";
+process.env.AI_RATE_LIMIT_PER_MINUTE = "2";
 process.env.RATE_LIMIT_PER_MINUTE = "2";
-process.env.ALLOWED_ORIGINS = "http://localhost:5173";
+process.env.CORS_ALLOWED_ORIGINS =
+  "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5174";
 process.env.AI_PROVIDERS = "gemini:test-model";
 process.env.GEMINI_API_KEY = "";
 process.env.AI_API_KEY = "";
@@ -24,11 +30,21 @@ const chatHandler = (await import("../api/chat.js")).default;
 const { createApp } = await import("../server/server.js");
 const { memoryStore } = await import("../lib/memory/memoryStore.js");
 const { submitTask } = await import("../lib/orchestrator/mastermind.js");
+const {
+  createSessionToken,
+  SESSION_COOKIE_NAME,
+  verifySessionToken,
+} = await import("../lib/auth/session.js");
+const { resetAuthRateLimits } = await import("../lib/auth/routes.js");
 
 const TOKEN = "security-control-token-1234567890";
 const authorized = { "x-grandmaster-token": TOKEN };
 const UNKNOWN_ID = "00000000-0000-0000-0000-000000000000";
 let sequence = 0;
+
+function sessionCookie() {
+  return `${SESSION_COOKIE_NAME}=${createSessionToken(process.env)}`;
+}
 
 async function call(method, requestPath, options = {}) {
   sequence += 1;
@@ -314,15 +330,50 @@ test("malformed, wrong-type and oversized bodies are rejected safely", async () 
 
 test("CORS allow-list rejects unlisted origins and never accepts a wildcard", async () => {
   assert.equal(isOriginAllowed("http://localhost:5173"), true);
+  assert.equal(isOriginAllowed("http://localhost:5174"), true);
+  assert.equal(isOriginAllowed("http://127.0.0.1:5174"), true);
   assert.equal(isOriginAllowed("https://evil.example"), false);
   assert.equal(
     isOriginAllowed("https://evil.example", {
       ...process.env,
+      CORS_ALLOWED_ORIGINS: "*",
       ALLOWED_ORIGINS: "*",
     }),
     false,
   );
-  assert.ok(!getAllowedOrigins({ ...process.env, ALLOWED_ORIGINS: "*" }).includes("*"));
+  const wildcardEnvs = [
+    { ...process.env, CORS_ALLOWED_ORIGINS: "*", ALLOWED_ORIGINS: "*" },
+    { ...process.env, CORS_ALLOWED_ORIGINS: "http://localhost:5174,*", ALLOWED_ORIGINS: "" },
+    { ...process.env, CORS_ALLOWED_ORIGINS: "*.example.com", ALLOWED_ORIGINS: "" },
+  ];
+  for (const env of wildcardEnvs) {
+    assert.ok(!getAllowedOrigins(env).includes("*"));
+    assert.equal(getAllowedOrigins(env).some((origin) => origin.includes("*")), false);
+  }
+
+  // Dev defaults apply only outside production; production without an explicit
+  // list fails closed instead of silently allowing localhost.
+  const devOrigins = getAllowedOrigins({ NODE_ENV: "development", CORS_ALLOWED_ORIGINS: "" });
+  assert.ok(devOrigins.includes("http://localhost:5174"));
+  assert.ok(devOrigins.includes("http://127.0.0.1:5174"));
+  assert.ok(devOrigins.includes("http://localhost:5173"));
+  assert.equal(
+    isOriginAllowed("http://localhost:5174", { NODE_ENV: "production", CORS_ALLOWED_ORIGINS: "" }),
+    false,
+  );
+  assert.deepEqual(
+    getAllowedOrigins({ NODE_ENV: "production", CORS_ALLOWED_ORIGINS: "" }),
+    [],
+  );
+
+  // Explicit env list wins over dev defaults and entries are normalised.
+  assert.deepEqual(
+    getAllowedOrigins({
+      NODE_ENV: "development",
+      CORS_ALLOWED_ORIGINS: " http://localhost:5174/ , http://127.0.0.1:5174 ",
+    }),
+    ["http://localhost:5174", "http://127.0.0.1:5174"],
+  );
 
   const deniedRes = fakeRes();
   const answered = applyCors(
@@ -333,13 +384,14 @@ test("CORS allow-list rejects unlisted origins and never accepts a wildcard", as
   assert.equal(deniedRes.statusCode, 403);
 });
 
-test("Express app enforces CORS, body limits and honest health labels end to end", async () => {
+test("Express app enforces auth, CORS, body limits and honest health labels end to end", async () => {
   const app = createApp();
   const server = await new Promise((resolve) => {
     const instance = app.listen(0, "127.0.0.1", () => resolve(instance));
   });
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
+  const cookie = sessionCookie();
 
   try {
     const denied = await fetch(`${base}/api/health`, {
@@ -355,22 +407,74 @@ test("Express app enforces CORS, body limits and honest health labels end to end
       allowed.headers.get("access-control-allow-origin"),
       "http://localhost:5173",
     );
-    const health = await allowed.json();
-    assert.equal(health.status, "DEGRADED");
-    assert.equal(health.service, "GREEN");
-    assert.equal(health.ok, true);
-    assert.equal(health.checks.controlAuthority.status, "pass");
-    assert.equal(health.checks.aiProvider.configured, false);
-    assert.ok(health.reasonCodes.includes("AI_PROVIDER_NOT_CONFIGURED"));
-    assert.ok(
-      ["GREEN", "NOT CONNECTED", "CAPABILITY NOT VERIFIED", "DATA REQUIRED"].includes(
-        health.providerStatus,
-      ),
+    assert.equal(allowed.headers.get("x-content-type-options"), "nosniff");
+    assert.ok(allowed.headers.get("content-security-policy"));
+    const viteLatest = await fetch(`${base}/api/health`, {
+      headers: { Origin: "http://localhost:5174" },
+    });
+    assert.equal(viteLatest.status, 200);
+    assert.equal(
+      viteLatest.headers.get("access-control-allow-origin"),
+      "http://localhost:5174",
     );
+
+    const health = await allowed.json();
+    assert.equal(health.ok, true);
+    assert.equal(health.status, "alive");
+    assert.equal(health.service, "grandmaster-digital-hub");
+    assert.equal(Object.prototype.hasOwnProperty.call(health, "checks"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(health, "providerStatus"), false);
 
     const wrongMethod = await fetch(`${base}/api/health`, { method: "POST" });
     assert.equal(wrongMethod.status, 405);
     assert.equal(wrongMethod.headers.get("allow"), "GET, HEAD");
+
+    // Private readiness and provider routes require the signed session.
+    const readinessDenied = await fetch(`${base}/api/health/readiness`);
+    assert.equal(readinessDenied.status, 401);
+    assert.equal((await readinessDenied.json()).code, "AUTH_REQUIRED");
+
+    const providersDenied = await fetch(`${base}/api/ai/providers`);
+    assert.equal(providersDenied.status, 401);
+
+    const readiness = await fetch(`${base}/api/health/readiness`, {
+      headers: { Cookie: cookie },
+    });
+    assert.equal(readiness.status, 200);
+    const readinessBody = await readiness.json();
+    assert.equal(readinessBody.status, "DEGRADED");
+    assert.equal(readinessBody.checks.controlAuthority.status, "pass");
+    assert.equal(readinessBody.checks.aiProvider.configured, false);
+    assert.ok(readinessBody.reasonCodes.includes("AI_PROVIDER_NOT_CONFIGURED"));
+
+    // Sign-in flow: wrong password 401, right password sets the HttpOnly cookie.
+    const badLogin = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "wrong-password-value" }),
+    });
+    assert.equal(badLogin.status, 401);
+    assert.equal((await badLogin.json()).code, "AUTH_INVALID_CREDENTIALS");
+
+    const goodLogin = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "security-ui-password-123" }),
+    });
+    assert.equal(goodLogin.status, 200);
+    const setCookie = goodLogin.headers.get("set-cookie") || "";
+    assert.ok(setCookie.includes("gm_session="));
+    assert.ok(setCookie.toLowerCase().includes("httponly"));
+    assert.ok(setCookie.toLowerCase().includes("samesite=strict"));
+
+    const session = await fetch(`${base}/api/auth/session`, {
+      headers: { Cookie: cookie },
+    });
+    assert.equal(session.status, 200);
+    assert.equal((await session.json()).authenticated, true);
+
+    const sessionDenied = await fetch(`${base}/api/auth/session`);
+    assert.equal(sessionDenied.status, 401);
 
     const oversized = await fetch(`${base}/api/chat`, {
       method: "POST",
@@ -379,11 +483,21 @@ test("Express app enforces CORS, body limits and honest health labels end to end
     });
     assert.equal(oversized.status, 413);
 
+    const chatDenied = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: "hello" }),
+    });
+    assert.equal(chatDenied.status, 401);
+
+    const v1Denied = await fetch(`${base}/api/v1/memory`);
+    assert.equal(v1Denied.status, 401);
+
     const chatStatuses = [];
     for (let index = 0; index < 3; index += 1) {
       const response = await fetch(`${base}/api/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Cookie: cookie },
         body: JSON.stringify({ message: `hello ${index}` }),
       });
       chatStatuses.push(response.status);
@@ -395,7 +509,7 @@ test("Express app enforces CORS, body limits and honest health labels end to end
   }
 });
 
-test("Vercel chat adapter rejects oversized bodies and rate limits with 429", async () => {
+test("Vercel chat adapter requires a session, rejects oversized bodies and rate limits", async () => {
   const oversizedReq = {
     method: "POST",
     headers: { "content-length": String(70 * 1024), "x-forwarded-for": "203.0.113.10" },
@@ -406,11 +520,23 @@ test("Vercel chat adapter rejects oversized bodies and rate limits with 429", as
   await chatHandler(oversizedReq, oversizedRes);
   assert.equal(oversizedRes.statusCode, 413);
 
+  const deniedReq = {
+    method: "POST",
+    headers: { "x-forwarded-for": "203.0.113.15" },
+    body: { message: "hello" },
+    socket: {},
+  };
+  const deniedRes = fakeRes();
+  await chatHandler(deniedReq, deniedRes);
+  assert.equal(deniedRes.statusCode, 401);
+  assert.equal(deniedRes.body.code, "AUTH_REQUIRED");
+
   const statuses = [];
+  const cookie = sessionCookie();
   for (let index = 0; index < 3; index += 1) {
     const req = {
       method: "POST",
-      headers: { "x-forwarded-for": "203.0.113.20" },
+      headers: { "x-forwarded-for": "203.0.113.20", cookie },
       body: { message: `hello ${index}` },
       socket: {},
     };
@@ -420,6 +546,23 @@ test("Vercel chat adapter rejects oversized bodies and rate limits with 429", as
   }
   assert.deepEqual(statuses.slice(0, 2).every((status) => status === 503), true);
   assert.equal(statuses[2], 429);
+});
+
+test("session tokens are signed, expire and reject tampering", () => {
+  const token = createSessionToken(process.env);
+  const now = Date.now();
+  assert.ok(verifySessionToken(token, process.env, now));
+
+  const parts = token.split(".");
+  const tampered = `${parts[0]}.${parts[1]}.${"0".repeat(64)}`;
+  assert.equal(verifySessionToken(tampered, process.env, now), null);
+  assert.equal(verifySessionToken("v1.not-a-number.abc", process.env, now), null);
+  assert.equal(verifySessionToken(token, process.env, now + 13 * 60 * 60 * 1000), null);
+  assert.equal(
+    verifySessionToken(token, { ...process.env, GRANDMASTER_SESSION_SECRET: "" }, now),
+    null,
+  );
+  resetAuthRateLimits();
 });
 
 test("audit records protected operations with structure and no credentials", async () => {

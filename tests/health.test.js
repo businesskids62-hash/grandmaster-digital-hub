@@ -7,9 +7,12 @@ import path from "node:path";
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "grandmaster-health-"));
 process.env.GRANDMASTER_DATA_DIR = dataDir;
 process.env.GRANDMASTER_CONTROL_TOKEN = "health-control-token-1234567890";
+process.env.GRANDMASTER_UI_PASSWORD = "health-ui-password-123";
+process.env.GRANDMASTER_SESSION_SECRET =
+  "health-session-secret-0123456789abcdef0123456789";
 process.env.GRANDMASTER_LOG_SILENT = "1";
 process.env.HEALTH_RATE_LIMIT_PER_MINUTE = "1000";
-process.env.ALLOWED_ORIGINS = "http://localhost:5173";
+process.env.CORS_ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:5174";
 process.env.AI_PROVIDERS = "gemini:test-model";
 process.env.GEMINI_API_KEY = "";
 process.env.AI_API_KEY = "";
@@ -26,6 +29,14 @@ const { resetVerificationSnapshot, verifyProvider } = await import(
   "../lib/aiProviders.js"
 );
 const healthHandler = (await import("../api/health.js")).default;
+const readinessHandler = (await import("../api/health/readiness.js")).default;
+const { createSessionToken, SESSION_COOKIE_NAME } = await import(
+  "../lib/auth/session.js"
+);
+
+function sessionCookie() {
+  return `${SESSION_COOKIE_NAME}=${createSessionToken(process.env)}`;
+}
 
 const fakeProviderFetch = async () => ({
   ok: true,
@@ -122,6 +133,39 @@ test("DEGRADED when a provider is configured but not live verified", () => {
   assert.equal(report.body.checks.aiProvider.liveVerified, false);
   assert.equal(report.body.checks.aiProvider.verificationState, "configured_unverified");
   assert.equal(report.body.providerStatus, "CAPABILITY NOT VERIFIED");
+});
+
+test("DEGRADED with QUOTA_EXCEEDED when the provider returns 429", async () => {
+  resetVerificationSnapshot();
+  const env = {
+    ...process.env,
+    GEMINI_API_KEY: "unit-test-key",
+    AI_PROVIDERS: "gemini:quota-model",
+  };
+  const quotaFetch = async () => ({
+    ok: false,
+    status: 429,
+    headers: new Map([["retry-after", "45"]]),
+    json: async () => ({ error: { message: "Quota exceeded" } }),
+  });
+
+  const verification = await verifyProvider(env, {
+    fetchImpl: quotaFetch,
+    timeoutMs: 1_000,
+    maxRetries: 0,
+  });
+  assert.equal(verification.status, "failed");
+
+  const report = createHealthReport({ env });
+  assert.equal(report.statusCode, 200);
+  assert.equal(report.body.status, "DEGRADED");
+  assert.ok(report.body.reasonCodes.includes("AI_PROVIDER_QUOTA_EXCEEDED"));
+  assert.equal(report.body.reasonCodes.includes("AI_PROVIDER_NOT_CONFIGURED"), false);
+  assert.equal(report.body.checks.aiProvider.configured, true);
+  assert.equal(report.body.checks.aiProvider.verificationState, "quota_exceeded");
+  assert.equal(report.body.checks.aiProvider.quotaExceeded, true);
+  assert.equal(report.body.providerStatus, "QUOTA EXCEEDED");
+  resetVerificationSnapshot();
 });
 
 test("ERROR when the control authority is not configured", () => {
@@ -266,7 +310,7 @@ test("health rate limiting is per client, bounded and expires", () => {
   resetHealthRateLimits();
 });
 
-test("Vercel health handler is public, truthfully labelled and rate limited", async () => {
+test("Vercel liveness handler is public, minimal and rate limited", async () => {
   resetHealthRateLimits();
   const req = {
     method: "GET",
@@ -277,11 +321,16 @@ test("Vercel health handler is public, truthfully labelled and rate limited", as
   await healthHandler(req, res);
 
   assert.equal(res.statusCode, 200);
-  assert.equal(res.body.status, "DEGRADED");
+  assert.equal(res.body.status, "alive");
   assert.equal(res.body.ok, true);
+  assert.equal(res.body.service, "grandmaster-digital-hub");
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body, "checks"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body, "providerStatus"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body, "aiConfigured"), false);
   assert.ok(res.headers["x-request-id"]);
   assert.equal(res.headers["cache-control"], "no-store");
   assert.equal(res.headers["x-ratelimit-limit"], "1000");
+  assert.ok(res.headers["content-security-policy"]);
 
   const postRes = fakeRes();
   await healthHandler({ ...req, method: "POST" }, postRes);
@@ -317,4 +366,42 @@ test("Vercel health handler is public, truthfully labelled and rate limited", as
     process.env.HEALTH_RATE_LIMIT_PER_MINUTE = "1000";
     resetHealthRateLimits();
   }
+});
+
+test("Vercel readiness handler requires a session and reports honest state", async () => {
+  resetVerificationSnapshot();
+  resetHealthRateLimits();
+
+  const denied = fakeRes();
+  await readinessHandler(
+    {
+      method: "GET",
+      headers: { "x-forwarded-for": "198.51.100.90" },
+      socket: {},
+    },
+    denied,
+  );
+  assert.equal(denied.statusCode, 401);
+  assert.equal(denied.body.code, "AUTH_REQUIRED");
+
+  const res = fakeRes();
+  await readinessHandler(
+    {
+      method: "GET",
+      headers: {
+        "x-forwarded-for": "198.51.100.91",
+        cookie: sessionCookie(),
+      },
+      socket: {},
+    },
+    res,
+  );
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.status, "DEGRADED");
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.checks.aiProvider.configured, false);
+  assert.ok(res.body.reasonCodes.includes("AI_PROVIDER_NOT_CONFIGURED"));
+  assert.equal(res.body.verification.liveProviderCall, false);
+  assert.equal(Object.prototype.hasOwnProperty.call(res.body.storage, "path"), false);
+  resetHealthRateLimits();
 });

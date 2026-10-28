@@ -16,7 +16,9 @@ delete process.env.GEMINI_MODEL;
 delete process.env.GEMINI_FALLBACK_MODEL;
 
 const { handleV1 } = await import("../lib/api/v1.js");
-const { getMt5Status, readMt5Snapshot } = await import("../lib/integrations/mt5Bridge.js");
+const { getMt5Status, probeMt5Status, readMt5Snapshot } = await import(
+  "../lib/integrations/mt5Bridge.js"
+);
 const { getIntegrations } = await import("../lib/integrations/registry.js");
 const { getSecurityPosture } = await import("../lib/security/posture.js");
 
@@ -115,11 +117,88 @@ test("public MT5 status reports configuration without leaking the bridge URL", a
 
   const response = await call("GET", "/mt5/status", {
     env: envWith({ MT5_BRIDGE_URL: "http://127.0.0.1:5100" }),
+    fetchImpl: async () => jsonResponse(bridgePayload()),
   });
   assert.equal(response.status, 200);
   assert.equal(response.body.data.configured, true);
+  assert.equal(response.body.data.reachable, true);
+  assert.equal(response.body.data.status, "online");
   assert.equal(response.body.data.readOnly, true);
   assert.equal(response.body.data.tradingLocked, true);
+  assert.ok(!JSON.stringify(response.body).includes("127.0.0.1"));
+});
+
+test("reachability probe separates online, terminal-disconnected, offline and invalid bridges", async () => {
+  const env = { MT5_BRIDGE_URL: "http://127.0.0.1:8765" };
+
+  const online = await probeMt5Status({
+    env,
+    fetchImpl: async () => jsonResponse(bridgePayload()),
+  });
+  assert.equal(online.configured, true);
+  assert.equal(online.reachable, true);
+  assert.equal(online.terminalConnected, true);
+  assert.equal(online.status, "online");
+  assert.equal(online.reasonCode, "MT5_BRIDGE_ONLINE");
+  assert.equal(online.readOnly, true);
+  assert.equal(online.tradingLocked, true);
+  assert.ok(!JSON.stringify(online).includes("127.0.0.1"));
+
+  const terminal = await probeMt5Status({
+    env,
+    fetchImpl: async () => jsonResponse({ connected: false }),
+  });
+  assert.equal(terminal.configured, true);
+  assert.equal(terminal.reachable, true);
+  assert.equal(terminal.terminalConnected, false);
+  assert.equal(terminal.status, "terminal_disconnected");
+  assert.equal(terminal.reasonCode, "MT5_BRIDGE_TERMINAL_DISCONNECTED");
+
+  const offline = await probeMt5Status({
+    env,
+    fetchImpl: async () => {
+      throw new Error("connect ECONNREFUSED 127.0.0.1:8765");
+    },
+  });
+  assert.equal(offline.configured, true);
+  assert.equal(offline.reachable, false);
+  assert.equal(offline.status, "offline");
+  assert.equal(offline.reasonCode, "MT5_BRIDGE_UNREACHABLE");
+  assert.ok(!JSON.stringify(offline).includes("ECONNREFUSED"));
+
+  const invalid = await probeMt5Status({
+    env,
+    fetchImpl: async () => new Response("not-json", { status: 200 }),
+  });
+  assert.equal(invalid.reachable, true);
+  assert.equal(invalid.status, "bridge_invalid_response");
+  assert.equal(invalid.reasonCode, "MT5_BRIDGE_INVALID_RESPONSE");
+
+  const unconfigured = await probeMt5Status({ env: {} });
+  assert.equal(unconfigured.configured, false);
+  assert.equal(unconfigured.reachable, false);
+  assert.equal(unconfigured.status, "not_connected");
+
+  const blocked = await probeMt5Status({ env: { MT5_BRIDGE_URL: "https://example.com" } });
+  assert.equal(blocked.configured, true);
+  assert.equal(blocked.reachable, false);
+  assert.equal(blocked.status, "blocked");
+  assert.ok(!JSON.stringify(blocked).includes("example.com"));
+});
+
+test("the status endpoint reports a configured but offline bridge without crashing", async () => {
+  const response = await call("GET", "/mt5/status", {
+    env: envWith({ MT5_BRIDGE_URL: "http://127.0.0.1:8765" }),
+    fetchImpl: async () => {
+      throw new Error("connect ECONNREFUSED 127.0.0.1:8765");
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.data.configured, true);
+  assert.equal(response.body.data.reachable, false);
+  assert.equal(response.body.data.status, "offline");
+  assert.equal(response.body.data.reasonCode, "MT5_BRIDGE_UNREACHABLE");
+  assert.equal(response.body.data.readOnly, true);
   assert.ok(!JSON.stringify(response.body).includes("127.0.0.1"));
 });
 
@@ -175,6 +254,8 @@ test("snapshot sanitizes account and position fields and masks the login", async
   assert.equal(snapshot.positions.length, 2);
   assert.equal(snapshot.positions[0].side, "BUY");
   assert.equal(snapshot.positions[1].side, "SELL");
+  assert.equal(snapshot.positions[0].currentPrice, 1.105);
+  assert.equal(snapshot.positions[0].openPrice, 1.1);
   assert.deepEqual(Object.keys(snapshot.positions[0]).sort(), [
     "currentPrice",
     "openPrice",
@@ -194,6 +275,17 @@ test("snapshot sanitizes account and position fields and masks the login", async
   assert.equal(seen.init.method, "GET");
   assert.equal(seen.init.redirect, "error");
   assert.equal(seen.init.signal instanceof AbortSignal, true);
+});
+
+test("a login already masked by the bridge is not masked twice", async () => {
+  const payload = bridgePayload();
+  payload.account.login = "****4321";
+  const result = await readMt5Snapshot({
+    env: { MT5_BRIDGE_URL: "http://127.0.0.1:8765" },
+    fetchImpl: async () => jsonResponse(payload),
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.snapshot.account.login, "****4321");
 });
 
 test("a reachable bridge with no terminal returns no account data", async () => {
@@ -258,6 +350,57 @@ test("timeouts, unreachable bridges and invalid payloads fail with safe codes", 
       result.error.code,
     );
   }
+});
+
+test("snapshot reports demo mode and symbol health without terminal paths", async () => {
+  const payload = bridgePayload({
+    checkedAt: new Date().toISOString(),
+    terminal: {
+      connected: true,
+      build: 6292,
+      company: "Exness Technologies Ltd",
+      path: "C:\\Program Files\\MetaTrader 5\\terminal64.exe",
+      data_path: "C:\\Users\\secret\\AppData",
+    },
+    account: {
+      login: 987654321,
+      server: "Exness-MT5Trial16",
+      currency: "USD",
+      tradeMode: "demo",
+      isDemo: true,
+      password: "super-secret",
+    },
+    symbolHealth: {
+      name: "XAUUSDm",
+      available: true,
+      visible: true,
+      bid: 4033.027,
+      ask: 4033.267,
+      tickTime: new Date().toISOString(),
+      tickAgeSeconds: 5,
+      stale: false,
+    },
+  });
+  const fetchImpl = async () => jsonResponse(payload);
+  const result = await readMt5Snapshot({
+    env: { MT5_BRIDGE_URL: "http://127.0.0.1:5100" },
+    fetchImpl,
+  });
+
+  assert.equal(result.ok, true);
+  const snapshot = result.snapshot;
+  assert.equal(snapshot.account.tradeMode, "demo");
+  assert.equal(snapshot.account.isDemo, true);
+  assert.equal(snapshot.terminal.connected, true);
+  assert.equal(snapshot.terminal.company, "Exness Technologies Ltd");
+  assert.equal(snapshot.symbolHealth.name, "XAUUSDm");
+  assert.equal(snapshot.symbolHealth.available, true);
+  assert.equal(snapshot.symbolHealth.bid, 4033.027);
+  assert.equal(snapshot.symbolHealth.stale, false);
+
+  const serialized = JSON.stringify(snapshot);
+  assert.ok(!serialized.includes("C:\\\\Users"));
+  assert.ok(!serialized.includes("super-secret"));
 });
 
 test("snapshot endpoint requires the control token and POST actions are rejected", async () => {
@@ -361,6 +504,8 @@ test("the MT5 page is read-only and never stores the token in browser storage", 
   assert.match(source, /type="password"/);
   assert.match(source, /X-Grandmaster-Token/);
   assert.match(source, /TRADING LOCKED/);
+  assert.match(source, /BRIDGE: OFFLINE/);
+  assert.match(source, /BRIDGE: NOT CONFIGURED/);
   assert.match(source, /\/mt5\/snapshot/);
   assert.match(source, /\/mt5\/status/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|document\.cookie/);

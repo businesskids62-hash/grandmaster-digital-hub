@@ -71,11 +71,11 @@ test("loading, empty, error, retry and malformed-response states exist", () => {
   assert.match(desk, /No audit events recorded/);
   assert.match(desk, /role="alert"/);
   assert.match(desk, /MALFORMED_RESPONSE/);
-  assert.match(desk, /onClick=\{\(\) => loadCore\(token\)\}/);
+  assert.match(desk, /onClick=\{\(\) => loadCore\(\)\}/);
   assert.match(desk, /No substitute data is shown/);
 });
 
-test("Agent Desks memory requests are token-gated and never persisted", () => {
+test("Agent Desks memory requests use the signed session and are never persisted", () => {
   const desk = readSource("src/pages/AgentDesks.jsx");
 
   const loadCoreBlock = desk.slice(
@@ -85,37 +85,34 @@ test("Agent Desks memory requests are token-gated and never persisted", () => {
   assert.equal(loadCoreBlock.includes('"/memory'), false);
   assert.equal(loadCoreBlock.includes("`/memory"), false);
 
-  assert.match(desk, /request\(apiBase, "\/memory\?limit=50", \{ token: auth \}\)/);
-  assert.match(desk, /request\(apiBase, `\/memory\?\$\{params\.toString\(\)\}`, \{\s*token: token\.trim\(\)/);
-  assert.match(desk, /request\(apiBase, "\/memory\?limit=50", \{\s*token: token\.trim\(\)/);
+  assert.match(desk, /request\(apiBase, "\/memory\?limit=50"\)/);
+  assert.match(desk, /request\(apiBase, `\/memory\?\$\{params\.toString\(\)\}`\)/);
   assert.match(desk, /Memory is locked/);
-  assert.match(desk, /disabled=\{!token\.trim\(\) \|\| busy === "memory-list"\}/);
+  assert.match(desk, /disabled=\{busy === "memory-list"\}/);
+  assert.equal(desk.includes("X-Grandmaster-Token"), false);
+  assert.equal(desk.includes("token: token"), false);
   assert.doesNotMatch(desk, /(localStorage|sessionStorage)\.(setItem|getItem|removeItem)/);
 });
 
-test("Agent Desks sends the token on every protected operation", () => {
+test("Agent Desks relies on the signed session for every protected operation", () => {
   const desk = readSource("src/pages/AgentDesks.jsx");
 
+  assert.match(desk, /request\(apiBase, "\/tasks\?limit=50"\)/);
+  assert.match(desk, /request\(apiBase, "\/notifications"\)/);
   assert.match(
     desk,
-    /request\(apiBase, "\/tasks\?limit=50", \{\s*token: auth\s*\}\)/,
+    /request\(apiBase, "\/tasks", \{\s*method: "POST",\s*body:/,
   );
   assert.match(
     desk,
-    /request\(apiBase, "\/notifications", \{ token: auth \}\)/,
+    /request\(apiBase, `\/tasks\/\$\{taskId\}\/\$\{action\}`, \{\s*method: "POST",\s*\}\)/,
   );
   assert.match(
     desk,
-    /request\(apiBase, "\/tasks", \{\s*method: "POST",\s*token: token\.trim\(\)/,
+    /request\(apiBase, `\/integrations\/\$\{id\}\/test`, \{\s*method: "POST",\s*\}\)/,
   );
-  assert.match(
-    desk,
-    /request\(apiBase, `\/tasks\/\$\{taskId\}\/\$\{action\}`, \{\s*method: "POST",\s*token: token\.trim\(\)/,
-  );
-  assert.match(
-    desk,
-    /request\(apiBase, `\/integrations\/\$\{id\}\/test`, \{\s*method: "POST",\s*token: token\.trim\(\)/,
-  );
+  assert.equal(desk.includes("GRANDMASTER_CONTROL_TOKEN"), true, "may only appear as explanatory copy");
+  assert.equal(desk.includes("gm-control-token"), false, "no token input field");
   assert.doesNotMatch(desk, /(localStorage|sessionStorage)\.(setItem|getItem|removeItem)/);
 });
 

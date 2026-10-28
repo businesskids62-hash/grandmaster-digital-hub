@@ -13,7 +13,11 @@ test("credentials stay in component memory and use separate authorities", () => 
   assert.ok(ui.includes('type="password"'));
   assert.ok(ui.includes('autoComplete="off"'));
   assert.ok(ui.includes("X-Grandmaster-Operator-Token"));
-  assert.ok(ui.includes("X-Grandmaster-Token"));
+  // The control token is never held by the browser; the server injects it
+  // after the signed session check.
+  assert.equal(ui.includes("X-Grandmaster-Token"), false);
+  assert.equal(ui.includes("controlToken"), false);
+  assert.match(ui, /server par control token se aati hai/);
 });
 
 test("the operator is NOT CONNECTED until server-side verification passes", () => {
@@ -31,7 +35,7 @@ test("the operator is NOT CONNECTED until server-side verification passes", () =
 test("plans freeze a hash and require a separate typed approval", () => {
   assert.ok(ui.includes("planHash"));
   assert.ok(ui.includes('confirmation !== "APPROVE"'));
-  assert.ok(ui.includes("controlToken"));
+  assert.ok(ui.includes("Approval authority"));
   assert.ok(ui.includes("/operator/runs"));
   assert.ok(ui.includes("/approve"));
   assert.ok(ui.includes("/execute"));
