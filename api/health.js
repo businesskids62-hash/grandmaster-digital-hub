@@ -1,11 +1,15 @@
-import { AGENT_REGISTRY } from "../lib/agents/registry.js";
-import { parseProviders, getProviderStatusList } from "../lib/aiProviders.js";
-import { taskStore } from "../lib/tasks/taskStore.js";
+import {
+  checkHealthRateLimit,
+  createHealthReport,
+  healthRateLimitHeaders,
+} from "../lib/healthStatus.js";
 import { prepare, sendJson } from "../lib/vercelHttp.js";
 
 // Public health endpoint. Never reveals secrets, environment variables or paths.
+// It returns GREEN only for verified core + provider state, DEGRADED when a
+// non-critical dependency is unavailable, and ERROR (503) when core checks fail.
 export default async function handler(req, res) {
-  prepare(req, res, process.env);
+  const { clientKey } = prepare(req, res, process.env);
   if (res.writableEnded) return;
 
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -13,26 +17,22 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed. Use GET." });
   }
 
-  const providers = parseProviders(process.env);
-  const statuses = getProviderStatusList(process.env);
-  const [primaryProvider, primaryModel] = (providers[0] || "").split(":");
-  const storage = taskStore.status();
+  const rate = checkHealthRateLimit(clientKey, process.env);
+  const rateHeaders = healthRateLimitHeaders(rate);
 
-  return sendJson(res, 200, {
-    ok: true,
-    status: "online",
-    timestamp: new Date().toISOString(),
-    provider: primaryProvider || "gemini",
-    model: primaryModel || "configured-model",
-    primary: primaryModel || "configured-model",
-    aiConfigured: statuses.some((item) => item.configured),
-    providersCount: providers.length,
-    agentsCount: AGENT_REGISTRY.length,
-    storage: {
-      mode: storage.mode,
-      durable: storage.durable,
-      ephemeral: storage.ephemeral,
-      writable: storage.writable,
-    },
-  });
+  if (!rate.allowed) {
+    return sendJson(
+      res,
+      429,
+      {
+        ok: false,
+        error: "Too many health requests. Try again in a minute.",
+        code: "HEALTH_RATE_LIMITED",
+      },
+      rateHeaders,
+    );
+  }
+
+  const report = createHealthReport({ env: process.env });
+  return sendJson(res, report.statusCode, report.body, rateHeaders);
 }

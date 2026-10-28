@@ -6,13 +6,17 @@ import {
   getProviderStatusList,
   parseProviders,
   AIProviderError,
+  PROVIDER_DEFAULTS,
 } from "../../lib/aiProviders.js";
 
 export class AIError extends AIProviderError {}
 
 export function getAIConfig(env = process.env) {
   const providers = parseProviders(env);
-  const primary = providers[0] || { provider: "gemini", model: "gemini-3.6-flash" };
+  const primary = providers[0] || {
+    provider: "gemini",
+    model: PROVIDER_DEFAULTS.gemini.defaultModel,
+  };
   const statuses = getProviderStatusList(env);
   const isConfigured = statuses.some((s) => s.configured);
 
@@ -73,22 +77,31 @@ export async function generateAiReply(
 
   let url;
   let body;
+  let headers = { "Content-Type": "application/json" };
   if (provider === "gemini") {
-    url = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey || "")}`;
+    // Credentials travel in a header, never in the URL or logs.
+    url = `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
+    headers = { ...headers, "x-goog-api-key": key };
     body = { contents: [{ role: "user", parts: [{ text: message }] }] };
   } else if (provider === "anthropic") {
     url = `${baseUrl}/v1/messages`;
+    headers = {
+      ...headers,
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+    };
     body = { model, max_tokens: 1024, messages: [{ role: "user", content: message }] };
   } else {
     // openai / openai-compatible
     url = `${baseUrl}/chat/completions`;
+    headers = { ...headers, Authorization: `Bearer ${key}` };
     body = { model, messages: [{ role: "user", content: message }] };
   }
 
   async function callProvider() {
     const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(body),
     });
 

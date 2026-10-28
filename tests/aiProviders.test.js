@@ -4,7 +4,12 @@ import assert from "node:assert/strict";
 import {
   executeProviderRotation,
   getProviderStatusList,
+  isVerificationCurrent,
+  providerHealthLabel,
   resetBreakerState,
+  resetVerificationSnapshot,
+  verifyProvider,
+  VERIFICATION_TTL_MS,
 } from "../lib/aiProviders.js";
 
 const fakeEnv = {
@@ -166,4 +171,161 @@ test("4. Cooldown skips cooling provider and attempts next available provider", 
   assert.equal(result2.reply, "Success Pro Call 2");
   const skipAttempt = result2.attempts.find((a) => a.provider === "gemini:gemini-3.8-flash");
   assert.equal(skipAttempt.status, "cooling_skipped");
+});
+
+test("5. verification evidence only marks the verified provider as GREEN", async () => {
+  resetBreakerState();
+  resetVerificationSnapshot();
+
+  const env = {
+    AI_PROVIDERS: "gemini:primary-model,gemini:secondary-model",
+    GEMINI_API_KEY: "mock-secret-key-12345",
+  };
+  const mockFetch = async (url) => {
+    if (url.includes("primary-model")) {
+      return {
+        ok: false,
+        status: 500,
+        headers: new Map(),
+        json: async () => ({ error: { message: "Primary unavailable" } }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: "OK" }] } }],
+      }),
+    };
+  };
+
+  try {
+    const result = await verifyProvider(env, {
+      fetchImpl: mockFetch,
+      timeoutMs: 1_000,
+    });
+    assert.equal(result.status, "verified");
+    assert.equal(result.provider, "gemini");
+    assert.equal(result.model, "secondary-model");
+
+    const statuses = getProviderStatusList(env);
+    const primary = statuses.find((item) => item.model === "primary-model");
+    const secondary = statuses.find((item) => item.model === "secondary-model");
+    assert.equal(providerHealthLabel(primary), "CAPABILITY NOT VERIFIED");
+    assert.equal(providerHealthLabel(secondary), "GREEN");
+  } finally {
+    resetBreakerState();
+    resetVerificationSnapshot();
+  }
+});
+
+test("6. failed verification never produces GREEN", async () => {
+  resetBreakerState();
+  resetVerificationSnapshot();
+
+  const env = {
+    AI_PROVIDERS: "gemini:primary-model,gemini:secondary-model",
+    GEMINI_API_KEY: "mock-secret-key-12345",
+  };
+  const failingFetch = async () => ({
+    ok: false,
+    status: 503,
+    headers: new Map(),
+    json: async () => ({ error: { message: "Unavailable" } }),
+  });
+
+  try {
+    const result = await verifyProvider(env, {
+      fetchImpl: failingFetch,
+      timeoutMs: 1_000,
+    });
+    assert.equal(result.status, "failed");
+    for (const provider of getProviderStatusList(env)) {
+      assert.equal(providerHealthLabel(provider), "CAPABILITY NOT VERIFIED");
+    }
+  } finally {
+    resetBreakerState();
+    resetVerificationSnapshot();
+  }
+});
+
+test("7. missing, stale or mismatched evidence never produces GREEN", () => {
+  const provider = { configured: true, provider: "gemini", model: "model-a" };
+  const valid = {
+    status: "verified",
+    provider: "gemini",
+    model: "model-a",
+    checkedAt: new Date().toISOString(),
+  };
+
+  assert.equal(providerHealthLabel(provider, null), "CAPABILITY NOT VERIFIED");
+  assert.equal(
+    providerHealthLabel(provider, { status: "verified" }),
+    "CAPABILITY NOT VERIFIED",
+  );
+  assert.equal(
+    providerHealthLabel(provider, { ...valid, provider: "openai" }),
+    "CAPABILITY NOT VERIFIED",
+  );
+  assert.equal(
+    providerHealthLabel(provider, { ...valid, model: "model-b" }),
+    "CAPABILITY NOT VERIFIED",
+  );
+  assert.equal(
+    providerHealthLabel(provider, {
+      ...valid,
+      checkedAt: new Date(Date.now() - VERIFICATION_TTL_MS - 1_000).toISOString(),
+    }),
+    "CAPABILITY NOT VERIFIED",
+  );
+  assert.equal(providerHealthLabel({ ...provider, configured: false }, valid), "NOT CONNECTED");
+  assert.equal(providerHealthLabel(provider, valid), "GREEN");
+
+  assert.equal(isVerificationCurrent(null), false);
+  assert.equal(isVerificationCurrent({ status: "verified" }), false);
+  assert.equal(
+    isVerificationCurrent({
+      ...valid,
+      checkedAt: new Date(Date.now() - VERIFICATION_TTL_MS - 1_000).toISOString(),
+    }),
+    false,
+  );
+  assert.equal(isVerificationCurrent(valid), true);
+});
+
+test("8. verified primary evidence does not mark a secondary provider GREEN", async () => {
+  resetBreakerState();
+  resetVerificationSnapshot();
+
+  const env = {
+    AI_PROVIDERS: "gemini:primary-model,gemini:secondary-model",
+    GEMINI_API_KEY: "mock-secret-key-12345",
+  };
+  const succeedingFetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: new Map(),
+    json: async () => ({
+      candidates: [{ content: { parts: [{ text: "OK" }] } }],
+    }),
+  });
+
+  try {
+    const result = await verifyProvider(env, {
+      fetchImpl: succeedingFetch,
+      timeoutMs: 1_000,
+    });
+    assert.equal(result.status, "verified");
+    assert.equal(result.model, "primary-model");
+
+    const statuses = getProviderStatusList(env);
+    const primary = statuses.find((item) => item.model === "primary-model");
+    const secondary = statuses.find((item) => item.model === "secondary-model");
+    assert.equal(providerHealthLabel(primary), "GREEN");
+    assert.equal(providerHealthLabel(secondary), "CAPABILITY NOT VERIFIED");
+  } finally {
+    resetBreakerState();
+    resetVerificationSnapshot();
+  }
 });

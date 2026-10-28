@@ -15,7 +15,8 @@ delete process.env.AI_API_KEY;
 delete process.env.GEMINI_MODEL;
 delete process.env.GEMINI_FALLBACK_MODEL;
 
-const { AGENT_REGISTRY, getRuntimeAgents } = await import("../lib/agents/registry.js");
+const { AGENT_REGISTRY, getRuntimeAgents, getDeskSummaries, EVIDENCE_LABELS } =
+  await import("../lib/agents/registry.js");
 const {
   buildPlan,
   submitTask,
@@ -29,14 +30,22 @@ const { auditStore } = await import("../lib/security/auditStore.js");
 const { executeProviderRotation } = await import("../lib/aiProviders.js");
 const { getSecurityPosture } = await import("../lib/security/posture.js");
 const { authorizeControlRequest } = await import("../lib/security/approval.js");
+const { createAuthorizationContext } = await import(
+  "../lib/security/authorizationContext.js"
+);
+
+const serverAuthorization = createAuthorizationContext({
+  actor: "unit-test",
+  requestId: "core-test",
+});
 
 after(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-test("agent registry exposes exactly 20 unique specialist contracts", () => {
-  assert.equal(AGENT_REGISTRY.length, 20);
-  assert.equal(new Set(AGENT_REGISTRY.map((item) => item.id)).size, 20);
+test("agent registry exposes exactly 21 unique specialist contracts", () => {
+  assert.equal(AGENT_REGISTRY.length, 21);
+  assert.equal(new Set(AGENT_REGISTRY.map((item) => item.id)).size, 21);
   for (const agent of AGENT_REGISTRY) {
     assert.ok(agent.name, `${agent.id} has a name`);
     assert.ok(agent.responsibility, `${agent.id} has a responsibility`);
@@ -50,17 +59,75 @@ test("agent registry exposes exactly 20 unique specialist contracts", () => {
 
 test("runtime agents never claim unverified capability", () => {
   const agents = getRuntimeAgents({}, { storageAvailable: true });
-  assert.equal(agents.length, 20);
+  assert.equal(agents.length, 21);
+  const labels = new Set(Object.values(EVIDENCE_LABELS));
   for (const agent of agents) {
     assert.ok(agent.statusReason.length > 0);
+    assert.ok(labels.has(agent.evidence.label), `${agent.id} has a known label`);
+    assert.ok(agent.evidence.detail.length > 0);
     if (agent.implementation !== "operational") {
       assert.notEqual(agent.gate, "GREEN", `${agent.id} must not be GREEN`);
     }
   }
   const trading = agents.find((item) => item.id === "trading_monitor");
   assert.equal(trading.gate, "LOCKED");
+  assert.equal(trading.evidence.label, "NOT CONNECTED");
   const social = agents.find((item) => item.id === "social_media");
   assert.equal(social.gate, "APPROVAL REQUIRED");
+  assert.equal(social.evidence.label, "APPROVAL REQUIRED");
+  const risk = agents.find((item) => item.id === "risk_manager");
+  assert.equal(risk.evidence.label, "LOCALLY TESTED");
+  assert.equal(risk.permissions.financialActions, false);
+});
+
+test("five mission desks map to real agents and never invent live metrics", () => {
+  const agents = getRuntimeAgents({}, { storageAvailable: true });
+  const desks = getDeskSummaries(
+    {},
+    { storageAvailable: true },
+    {
+      agents,
+      integrations: [],
+      taskStatsByAgent: { mastermind: 2, trading_monitor: 1 },
+    },
+  );
+
+  assert.deepEqual(
+    desks.map((desk) => desk.id),
+    ["mastermind", "mt5_monitor", "risk_manager", "communications", "social"],
+  );
+  for (const desk of desks) {
+    assert.ok(desk.name);
+    assert.ok(desk.boundary);
+    assert.ok(Object.values(EVIDENCE_LABELS).includes(desk.statusLabel));
+    assert.equal(desk.externalExecutionEnabled, false);
+    assert.equal(desk.metricsSource, "local task store");
+    assert.equal(desk.liveVerified, false, `${desk.id} must not claim live verification`);
+  }
+  const mastermind = desks.find((desk) => desk.id === "mastermind");
+  assert.equal(mastermind.taskCount, 2);
+  const mt5 = desks.find((desk) => desk.id === "mt5_monitor");
+  assert.equal(mt5.taskCount, 1);
+  assert.equal(mt5.gate, "LOCKED");
+  const social = desks.find((desk) => desk.id === "social");
+  assert.equal(social.approvalRequired, true);
+  assert.equal(social.statusLabel, "APPROVAL REQUIRED");
+});
+
+test("risk manager routes deterministically and only recommends, never executes", async () => {
+  const plan = buildPlan("risk review for my open exposure", {});
+  assert.equal(plan.agentId, "risk_manager");
+
+  const result = await submitTask({
+    request: "risk review of the current task queue",
+    agentId: "risk_manager",
+    env: {},
+    authorization: serverAuthorization,
+  });
+  assert.equal(result.task.status, "COMPLETED");
+  assert.equal(result.task.result.data.verdict, "ALLOW");
+  assert.equal(result.task.result.data.execution, false);
+  assert.equal(result.task.result.data.externalActionsPerformed, false);
 });
 
 test("plan classifies a request without calling a provider", () => {
@@ -75,6 +142,7 @@ test("memory agent task completes only after validation and records full lifecyc
     request: "remember: prefer short, evidence-based answers",
     agentId: "memory",
     env: {},
+    authorization: serverAuthorization,
   });
   const task = result.task;
   assert.equal(task.status, "COMPLETED");
@@ -90,6 +158,28 @@ test("memory agent task completes only after validation and records full lifecyc
     task.history.filter((entry) => entry.status === "COMPLETED").length,
     1,
   );
+});
+
+test("memory writes require a server-issued authorization context", async () => {
+  const before = memoryStore.stats().total;
+
+  const forged = await submitTask({
+    request: "remember: forged authorization must not persist",
+    agentId: "memory",
+    env: {},
+    authorization: { authorized: true },
+  });
+  assert.equal(forged.task.status, "FAILED");
+  assert.equal(forged.task.error.code, "MEMORY_AUTHORIZATION_REQUIRED");
+
+  const missing = await submitTask({
+    request: "remember: missing authorization must not persist",
+    agentId: "memory",
+    env: {},
+  });
+  assert.equal(missing.task.status, "FAILED");
+  assert.equal(missing.task.error.code, "MEMORY_AUTHORIZATION_REQUIRED");
+  assert.equal(memoryStore.stats().total, before);
 });
 
 test("financial execution is locked and creates no task", async () => {
@@ -152,6 +242,7 @@ test("completed task cannot be approved or rerun", async () => {
     request: "remember: task transitions are enforced",
     agentId: "memory",
     env: {},
+    authorization: serverAuthorization,
   });
   await assert.rejects(
     approveTask(result.task.id, { env: {} }),

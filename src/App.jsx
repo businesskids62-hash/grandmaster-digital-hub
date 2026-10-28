@@ -13,6 +13,8 @@ import { systemDoctor } from "./agents/systemDoctor.js";
 import { agentOrchestrator } from "./agents/agentOrchestrator.js";
 import { startWakeWord, speakRoar } from "./utils/wakeWord.js";
 import AgentDesks from "./pages/AgentDesks.jsx";
+import Mt5Monitor from "./pages/Mt5Monitor.jsx";
+import BrowserOperator from "./pages/BrowserOperator.jsx";
 
 
 /* ==========================================================================
@@ -106,6 +108,8 @@ const NAVIGATION = [
   { id: "builder", icon: "⌘", label: "App Builder" },
   { id: "agents", icon: "⬡", label: "AI Team" },
   { id: "desks", icon: "⌬", label: "Agent Operations" },
+  { id: "operator", icon: "◐", label: "Browser Operator" },
+  { id: "mt5", icon: "◫", label: "MT5 Monitor" },
   { id: "roadmap", icon: "▤", label: "100-Step Roadmap" },
   { id: "projects", icon: "▣", label: "Projects & Tasks" },
   { id: "business", icon: "↗", label: "Business Center" },
@@ -893,12 +897,12 @@ function App() {
   const taskCount = tasks.length;
   const finishedTasks = tasks.filter((t) => t.done).length;
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   // Persist gm5: versioned keys (cap 100, no attachments/base64, no auth secrets)
   useEffect(() => {
@@ -1347,7 +1351,9 @@ function App() {
                 subtitle="Meri kamzori, mera roadmap tarteeb se"
               />
               <div className="gm-muted gm-small" style={{ marginBottom: 10 }}>
-                Face, voice, writing style aur roadmap yahan save hote hain.
+                Face, voice, writing style aur roadmap sirf is browser ke
+                localStorage mein save hote hain — server par nahi, aur encrypted
+                nahi.
               </div>
               <div className="gm-list" style={{ marginTop: 8 }}>
                 <div className="gm-list-row">
@@ -1355,7 +1361,7 @@ function App() {
                   <div className="gm-row-main">
                     <div className="gm-row-title">Profile</div>
                     <div className="gm-row-sub">
-                      {hamzadSaved ? "Save hua hai" : "Abhi koi profile nahi"}
+                      {hamzadSaved ? "Save hua hai (browser only)" : "Abhi koi profile nahi"}
                     </div>
                   </div>
                 </div>
@@ -1420,25 +1426,25 @@ function App() {
           {doctorScan && (
             <section className="gm-card" style={{ marginTop: 16 }}>
               <SectionHeader
-                title="System Doctor — Scan Report"
-                subtitle="Virus scan aur disk cleanup result"
+                title="System Doctor — Simulated Scan Report"
+                subtitle="SIMULATED — browser sandbox has no filesystem or antivirus access"
               />
               <div className="gm-list" style={{ marginTop: 8 }}>
                 <div className="gm-list-row">
                   <span className="gm-row-icon">🦠</span>
                   <div className="gm-row-main">
-                    <div className="gm-row-title">Threats Found</div>
+                    <div className="gm-row-title">Simulated Threats Found</div>
                     <div className="gm-row-sub">
-                      {doctorScan.threats.length} threat(s)
+                      {doctorScan.threats.length} simulated threat(s)
                     </div>
                   </div>
                 </div>
                 <div className="gm-list-row">
                   <span className="gm-row-icon">🗑️</span>
                   <div className="gm-row-main">
-                    <div className="gm-row-title">Junk Files Cleaned</div>
+                    <div className="gm-row-title">Simulated Junk Files</div>
                     <div className="gm-row-sub">
-                      {doctorScan.junkFiles.length} file(s)
+                      {doctorScan.junkFiles.length} simulated file(s) — none were deleted
                     </div>
                   </div>
                 </div>
@@ -1454,11 +1460,11 @@ function App() {
                 <div className="gm-list-row">
                   <span className="gm-row-icon">💾</span>
                   <div className="gm-row-main">
-                    <div className="gm-row-title">Freed Space</div>
+                    <div className="gm-row-title">Simulated Freed Space</div>
                     <div className="gm-row-sub">
                       {(doctorScan.lastCleanup?.freedBytes / 1024 / 1024).toFixed(
                         2,
-                      )} MB
+                      )} MB (nothing was deleted)
                     </div>
                   </div>
                 </div>
@@ -1469,7 +1475,7 @@ function App() {
                   role="status"
                   style={{ marginTop: 10, textAlign: "center" }}
                 >
-                  ⚠️ Koi threat mila hai — system check karein
+                  ⚠️ Simulated threat report — no real scan was performed
                 </div>
               )}
             </section>
@@ -2198,9 +2204,11 @@ function App() {
         </section>
 
         <div className="gm-notice" style={{ marginBottom: 16 }}>
-          <strong>Status policy:</strong> Agents are specialist roles given to
-          the AI model. Koi agent tab tak “operational” nahi jab tak uska
-          execution workflow aur tests verify na hon.
+          <strong>Status policy:</strong> This AI Team roster is a browser-side
+          role list; its activity labels are MOCK/SIMULATED. Live task, approval
+          and integration evidence is shown in Agent Operations. Koi agent tab
+          tak “operational” nahi jab tak uska execution workflow aur tests
+          verify na hon.
         </div>
 
         <div className="gm-grid gm-agent-grid">
@@ -2520,7 +2528,7 @@ function App() {
       [
         "MT5 / Exness",
         "Read-only trading monitoring",
-        "Broker connectivity must be implemented and verified separately.",
+        "Requires a loopback bridge configured server-side. Trading is locked; open MT5 Monitor for configuration status.",
       ],
       [
         "Automation",
@@ -2571,13 +2579,13 @@ function App() {
     const deploymentStatus = {
       label:
         backend === "LIVE"
-          ? `VERIFIED LIVE (${BUILD_INFO.commitSha})`
+          ? `BACKEND REACHABLE (frontend ${BUILD_INFO.commitSha})`
           : backend === "OFF"
             ? "BACKEND UNREACHABLE"
             : "PROBING BACKEND",
       description:
         backend === "LIVE"
-          ? `Backend is live and responding. Built from commit ${BUILD_INFO.commitSha} at ${new Date(BUILD_INFO.buildTime).toLocaleString()}.`
+          ? `Backend responded to /api/health. This confirms reachability only — not provider verification, integration connectivity or trading capability. Frontend build ${BUILD_INFO.commitSha} at ${new Date(BUILD_INFO.buildTime).toLocaleString()}.`
           : `Frontend build ${BUILD_INFO.commitSha} is active, but /api/health is currently unreachable.`,
     };
 
@@ -2589,6 +2597,11 @@ function App() {
         "No money transfer functionality is implemented here.",
       ],
       [
+        "MT5 monitoring",
+        "READ ONLY",
+        "Account snapshots come only from a server-side loopback bridge and require the control token. No order, close or withdrawal endpoint exists.",
+      ],
+      [
         "API credentials",
         "SERVER-SIDE ONLY",
         "Never place private API keys in React source code or client env.",
@@ -2596,7 +2609,7 @@ function App() {
       [
         "Storage Policy",
         "NO AUTH TOKENS (gm5:*)",
-        "Zero tokens or credentials in localStorage. Only non-sensitive UI state (gm5:* keys, chat cap 100, no base64). Auth uses backend httpOnly cookies.",
+        "No authentication layer is implemented. The backend control token is server-side only and is never stored in the browser.",
       ],
       [
         "Social publishing",
@@ -2670,6 +2683,8 @@ function App() {
     builder: renderBuilder,
     agents: renderAgents,
     desks: () => <AgentDesks apiBase={API_BASE} />,
+    operator: () => <BrowserOperator apiBase={API_BASE} />,
+    mt5: () => <Mt5Monitor apiBase={API_BASE} />,
     roadmap: renderRoadmap,
     projects: renderProjects,
     business: renderBusiness,

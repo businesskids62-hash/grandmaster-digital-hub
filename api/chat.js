@@ -1,11 +1,14 @@
 import {
-  executeProviderRotation,
+  CHAT_SYSTEM_PROMPT,
   MAX_MESSAGE_CHARS,
+  executeProviderRotation,
+  sanitizeChatHistory,
 } from "../lib/aiProviders.js";
 import { prepare, sendJson } from "../lib/vercelHttp.js";
 
 const WINDOW_MS = 60_000;
 const MAX_REQUESTS = Number(process.env.RATE_LIMIT_PER_MINUTE) || 30;
+const MAX_BODY_BYTES = 64 * 1024;
 const hits = new Map();
 
 // Best-effort per-instance limiter. Serverless instances are ephemeral,
@@ -23,12 +26,7 @@ function rateLimited(clientKey) {
   return false;
 }
 
-const SYSTEM_PROMPT = [
-  "You are Grandmaster AI, the Mastermind of the Grandmaster Digital Hub.",
-  "Coordinate tasks, give concrete and honest guidance, and state clearly when something is not configured or not permitted.",
-  "Never claim that trading, money transfers or external publishing were performed.",
-  "Never ask for private credentials, API keys or passwords.",
-].join(" ");
+const SYSTEM_PROMPT = CHAT_SYSTEM_PROMPT;
 
 export default async function handler(req, res) {
   const { clientKey } = prepare(req, res, process.env);
@@ -39,13 +37,20 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed. Use POST." });
   }
 
+  if (Number(req.headers?.["content-length"] || 0) > MAX_BODY_BYTES) {
+    return res.status(413).json({ error: "Request body is too large." });
+  }
+
   if (rateLimited(clientKey)) {
     res.setHeader("Retry-After", "60");
     return res.status(429).json({ error: "Too many requests. Please wait a minute." });
   }
 
   try {
-    const { message, history } = req.body || {};
+    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+      return res.status(400).json({ error: "Request body must be a JSON object." });
+    }
+    const { message, history } = req.body;
 
     if (typeof message !== "string" || !message.trim()) {
       return res.status(400).json({ error: "A non-empty 'message' string is required." });
@@ -61,7 +66,7 @@ export default async function handler(req, res) {
 
     const result = await executeProviderRotation({
       message: message.trim(),
-      history: history || [],
+      history: sanitizeChatHistory(history),
       systemPrompt: SYSTEM_PROMPT,
       env: process.env,
     });

@@ -61,7 +61,7 @@ class SystemDoctor {
     if (this.scanRunning) return { running: true };
     this.scanRunning = true;
     this.lastScan = { startedAt: nowISO() };
-    this.addLog("Virus scan started", "scan");
+    this.addLog("Simulated virus scan started", "scan");
 
     const scan = async () => {
       try {
@@ -75,7 +75,7 @@ class SystemDoctor {
           status: threats.length > 0 ? "threats_found" : "clean",
         };
         this.addLog(
-          `Virus scan complete — ${threats.length} threat(s) found`,
+          `Simulated virus scan complete — ${threats.length} threat(s) reported (no real filesystem access)`,
           threats.length > 0 ? "warning" : "success",
         );
       } finally {
@@ -97,7 +97,7 @@ class SystemDoctor {
     if (this.scanRunning) return { running: true };
     this.scanRunning = true;
     this.lastCleanup = { startedAt: nowISO() };
-    this.addLog("Disk cleanup started", "cleanup");
+    this.addLog("Simulated disk cleanup started", "cleanup");
 
     const cleanup = async () => {
       try {
@@ -112,7 +112,7 @@ class SystemDoctor {
           status: "complete",
         };
         this.addLog(
-          `Disk cleanup complete — ${cleaned.length} file(s) removed`,
+          `Simulated disk cleanup complete — ${cleaned.length} file(s) reported (nothing was deleted)`,
           "success",
         );
       } finally {

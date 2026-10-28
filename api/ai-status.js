@@ -19,6 +19,7 @@ export default async function handler(req, res) {
   return sendJson(res, configured ? 200 : 503, {
     ok: configured,
     backend: "reachable",
+    status: configured ? "CAPABILITY NOT VERIFIED" : "NOT CONNECTED",
     provider: provider || "gemini",
     model: model || "configured-model",
     configured,

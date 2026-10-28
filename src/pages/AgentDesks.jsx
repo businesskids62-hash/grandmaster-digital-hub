@@ -33,12 +33,23 @@ const GATE_STYLE = {
   "APPROVAL REQUIRED": "gold",
 };
 
+const LABEL_STYLE = {
+  "LIVE VERIFIED": "green",
+  "LOCALLY TESTED": "green",
+  "VERIFIED IN CODE": "gold",
+  "APPROVAL REQUIRED": "gold",
+  "NOT CONNECTED": "red",
+  "NOT IMPLEMENTED": "red",
+  "MOCK/SIMULATED": "gold",
+};
+
 class ApiError extends Error {
-  constructor(message, code, status) {
+  constructor(message, code, status, requestId = null) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
+    this.requestId = requestId;
   }
 }
 
@@ -66,6 +77,7 @@ async function request(apiBase, path, { method = "GET", body, token } = {}) {
         payload?.error?.message || `Request failed (${response.status})`,
         payload?.error?.code || "REQUEST_FAILED",
         response.status,
+        payload?.requestId || null,
       );
     }
     if (!payload || typeof payload !== "object" || payload.ok !== true) {
@@ -73,6 +85,7 @@ async function request(apiBase, path, { method = "GET", body, token } = {}) {
         "The backend returned an unexpected response. Live data is unavailable.",
         "MALFORMED_RESPONSE",
         response.status,
+        payload?.requestId || null,
       );
     }
     return payload.data ?? {};
@@ -100,10 +113,25 @@ function statusTone(status) {
   return AGENT_STATUS_STYLE[status] || "";
 }
 
+function protectedAuthFailure(error) {
+  const suffix = error?.requestId ? ` (request ${error.requestId})` : "";
+  if (error?.code === "INVALID_CONTROL_TOKEN") {
+    return `Tasks and notifications are locked: the control token was rejected. Check the token and retry.${suffix}`;
+  }
+  if (error?.code === "APPROVAL_AUTHORITY_NOT_CONFIGURED") {
+    return `Tasks and notifications are locked: the server has no control authority configured.${suffix}`;
+  }
+  if (error?.code === "APPROVAL_REQUIRED") {
+    return `Tasks and notifications are locked: enter the control token to load them.${suffix}`;
+  }
+  return "";
+}
+
 export default function AgentDesks({ apiBase = "" }) {
   const [tab, setTab] = useState("agents");
   const [status, setStatus] = useState(null);
   const [agents, setAgents] = useState([]);
+  const [desks, setDesks] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [taskStats, setTaskStats] = useState(null);
   const [memories, setMemories] = useState([]);
@@ -122,6 +150,9 @@ export default function AgentDesks({ apiBase = "" }) {
   const [taskAgent, setTaskAgent] = useState("");
   const [memoryText, setMemoryText] = useState("");
   const [memoryNewCategory, setMemoryNewCategory] = useState("preference");
+  const [memoryLoaded, setMemoryLoaded] = useState(false);
+  const [memoryAuthError, setMemoryAuthError] = useState("");
+  const [taskAuthError, setTaskAuthError] = useState("");
   const [token, setToken] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
@@ -131,12 +162,16 @@ export default function AgentDesks({ apiBase = "" }) {
 
   const controlReady = Boolean(status?.controlAuthorityConfigured);
 
-  const loadCore = useCallback(async () => {
+  const loadCore = useCallback(async (authToken = "") => {
+    const auth = String(authToken || "").trim();
     setLoading(true);
     setError("");
+    setTaskAuthError("");
     try {
       const core = await request(apiBase, "/status");
       setStatus(core);
+      if (Array.isArray(core.notifications)) setChannels(core.notifications);
+      if (core.tasks) setTaskStats(core.tasks);
     } catch (e) {
       setError(
         e.status === 0 || e.code === "TIMEOUT"
@@ -147,56 +182,73 @@ export default function AgentDesks({ apiBase = "" }) {
       return;
     }
 
-    const settled = await Promise.allSettled([
-      request(apiBase, "/agents"),
-      request(apiBase, "/tasks?limit=50"),
-      request(apiBase, "/memory?limit=50"),
-      request(apiBase, "/integrations"),
-      request(apiBase, "/notifications"),
-      request(apiBase, "/security/posture"),
-    ]);
-    const [agentsRes, tasksRes, memoryRes, integrationsRes, notificationsRes, postureRes] =
-      settled;
+    const requests = [
+      ["agents", request(apiBase, "/agents")],
+      ["integrations", request(apiBase, "/integrations")],
+      ["security posture", request(apiBase, "/security/posture")],
+    ];
+    if (auth) {
+      requests.push(
+        ["tasks", request(apiBase, "/tasks?limit=50", { token: auth })],
+        ["notifications", request(apiBase, "/notifications", { token: auth })],
+      );
+    }
 
-    if (agentsRes.status === "fulfilled") setAgents(agentsRes.value.agents || []);
-    else setAgents([]);
-    if (tasksRes.status === "fulfilled") {
-      setTasks(tasksRes.value.tasks || []);
-      setTaskStats(tasksRes.value.stats || null);
+    const settled = await Promise.allSettled(requests.map(([, promise]) => promise));
+    const results = Object.fromEntries(
+      requests.map(([name], index) => [name, settled[index]]),
+    );
+
+    if (results.agents.status === "fulfilled") {
+      setAgents(results.agents.value.agents || []);
+      setDesks(results.agents.value.desks || []);
     } else {
-      setTasks([]);
-      setTaskStats(null);
+      setAgents([]);
+      setDesks([]);
     }
-    if (memoryRes.status === "fulfilled") {
-      setMemories(memoryRes.value.memories || []);
-      setMemoryCategories(memoryRes.value.categories || []);
-    } else {
-      setMemories([]);
-    }
-    if (integrationsRes.status === "fulfilled") {
-      setIntegrations(integrationsRes.value.integrations || []);
+    if (results.integrations.status === "fulfilled") {
+      setIntegrations(results.integrations.value.integrations || []);
     } else {
       setIntegrations([]);
     }
-    if (notificationsRes.status === "fulfilled") {
-      setChannels(notificationsRes.value.channels || []);
-    } else {
-      setChannels([]);
-    }
-    if (postureRes.status === "fulfilled") {
-      setPosture(postureRes.value.posture || null);
+    if (results["security posture"].status === "fulfilled") {
+      setPosture(results["security posture"].value.posture || null);
     } else {
       setPosture(null);
     }
 
-    const failedSections = [
-      ["agents", agentsRes],
-      ["tasks", tasksRes],
-      ["memory", memoryRes],
-      ["integrations", integrationsRes],
-      ["notifications", notificationsRes],
-      ["security posture", postureRes],
-    ].filter(([, result]) => result.status === "rejected");
+    const tasksResult = results.tasks;
+    if (tasksResult?.status === "fulfilled") {
+      setTasks(tasksResult.value.tasks || []);
+      setTaskStats(tasksResult.value.stats || null);
+    } else if (auth) {
+      setTasks([]);
+      setTaskStats(null);
+    }
+
+    const notificationsResult = results.notifications;
+    if (notificationsResult?.status === "fulfilled") {
+      setChannels(notificationsResult.value.channels || []);
+    } else if (auth) {
+      setChannels([]);
+    }
+
+    const protectedFailure =
+      tasksResult?.status === "rejected"
+        ? tasksResult.reason
+        : notificationsResult?.status === "rejected"
+          ? notificationsResult.reason
+          : null;
+    if (protectedFailure) {
+      const authMessage = protectedAuthFailure(protectedFailure);
+      if (authMessage) setTaskAuthError(authMessage);
+    }
+
+    const failedSections = Object.entries(results).filter(
+      ([name, result]) =>
+        result.status === "rejected" &&
+        !["tasks", "notifications"].includes(name),
+    );
     if (failedSections.length) {
       setError(
         `Could not load ${failedSections
@@ -208,12 +260,13 @@ export default function AgentDesks({ apiBase = "" }) {
   }, [apiBase]);
 
   useEffect(() => {
-    loadCore();
+    loadCore("");
   }, [loadCore]);
 
   const showError = (e) => {
     setNotice("");
-    setError(e?.message || "Request failed.");
+    const suffix = e?.requestId ? ` (request ${e.requestId})` : "";
+    setError(`${e?.message || "Request failed."}${suffix}`);
   };
 
   const requireToken = () => {
@@ -222,6 +275,56 @@ export default function AgentDesks({ apiBase = "" }) {
     setNotice("Control authorization required. Enter the server-side control token first.");
     return false;
   };
+
+  const memoryAuthFailure = (e) => {
+    const suffix = e?.requestId ? ` (request ${e.requestId})` : "";
+    if (e.code === "INVALID_CONTROL_TOKEN") {
+      return `Memory is locked: the control token was rejected. Check the token and try again.${suffix}`;
+    }
+    if (e.code === "APPROVAL_AUTHORITY_NOT_CONFIGURED") {
+      return `Memory is locked: the server has no control authority configured.${suffix}`;
+    }
+    if (e.code === "APPROVAL_REQUIRED") {
+      return `Memory is locked: enter the control token to load stored memories.${suffix}`;
+    }
+    return "";
+  };
+
+  const loadMemories = useCallback(
+    async (authToken = token, { silent = false } = {}) => {
+      const auth = String(authToken || "").trim();
+      if (!auth) {
+        setMemoryAuthError("");
+        setNotice("Enter the control token to load server memory.");
+        return false;
+      }
+      setBusy("memory-list");
+      setError("");
+      setMemoryAuthError("");
+      try {
+        const data = await request(apiBase, "/memory?limit=50", { token: auth });
+        setMemories(data.memories || []);
+        if (Array.isArray(data.categories) && data.categories.length) {
+          setMemoryCategories(data.categories);
+        }
+        setMemoryLoaded(true);
+        return true;
+      } catch (e) {
+        const authMessage = memoryAuthFailure(e);
+        if (authMessage) {
+          setMemories([]);
+          setMemoryLoaded(false);
+          setMemoryAuthError(authMessage);
+        } else if (!silent) {
+          showError(e);
+        }
+        return false;
+      } finally {
+        setBusy("");
+      }
+    },
+    [apiBase, token],
+  );
 
   async function openAgent(agentId) {
     setSelectedAgentId(agentId);
@@ -238,14 +341,20 @@ export default function AgentDesks({ apiBase = "" }) {
   }
 
   async function refreshTasks() {
-    const data = await request(apiBase, "/tasks?limit=50");
+    if (!requireToken()) return false;
+    const data = await request(apiBase, "/tasks?limit=50", {
+      token: token.trim(),
+    });
     setTasks(data.tasks || []);
     setTaskStats(data.stats || null);
+    setTaskAuthError("");
+    return true;
   }
 
   async function submitTask(event) {
     event.preventDefault();
     if (!taskRequest.trim()) return;
+    if (!requireToken()) return;
     setBusy("create-task");
     setError("");
     setNotice("");
@@ -254,6 +363,7 @@ export default function AgentDesks({ apiBase = "" }) {
     try {
       const data = await request(apiBase, "/tasks", {
         method: "POST",
+        token: token.trim(),
         body: {
           request: taskRequest.trim(),
           agentId: taskAgent || undefined,
@@ -262,16 +372,19 @@ export default function AgentDesks({ apiBase = "" }) {
       setPlanPreview(data.plan || null);
       setLastTask(data.task || null);
       setTaskRequest("");
+      setTaskAuthError("");
       setNotice(
         data.approvalRequired
           ? "Task created and is AWAITING APPROVAL. Nothing external was performed."
           : `Task finished with status ${data.task?.status || "unknown"}.`,
       );
       await refreshTasks();
-      await loadCore();
+      await loadCore(token);
     } catch (e) {
       if (e.code === "ACTION_LOCKED") {
         setNotice("LOCKED by policy. No task was created and no financial action was performed.");
+      } else if (protectedAuthFailure(e)) {
+        setTaskAuthError(protectedAuthFailure(e));
       } else {
         showError(e);
       }
@@ -306,27 +419,29 @@ export default function AgentDesks({ apiBase = "" }) {
   }
 
   async function taskAction(taskId, action) {
-    if (action === "approve" && !requireToken()) return;
+    if (!requireToken()) return;
     setBusy(`${action}-${taskId}`);
     setError("");
     setNotice("");
     try {
       const data = await request(apiBase, `/tasks/${taskId}/${action}`, {
         method: "POST",
-        token: action === "approve" ? token.trim() : undefined,
+        token: token.trim(),
       });
       const updated = data.task;
       setLastTask(updated || null);
+      setTaskAuthError("");
       setNotice(
         action === "approve"
           ? "Approval recorded. No external action has been performed."
           : `Task is now ${updated?.status || "updated"}.`,
       );
       await refreshTasks();
-      await loadCore();
+      await loadCore(token);
     } catch (e) {
-      if (e.code === "APPROVAL_REQUIRED" || e.code === "INVALID_CONTROL_TOKEN") {
-        setNotice(e.message);
+      const authMessage = protectedAuthFailure(e);
+      if (authMessage) {
+        setTaskAuthError(authMessage);
         setError("");
       } else {
         showError(e);
@@ -338,16 +453,31 @@ export default function AgentDesks({ apiBase = "" }) {
 
   async function searchMemory(event) {
     event.preventDefault();
+    if (!requireToken()) return;
     setBusy("memory-search");
     setError("");
+    setMemoryAuthError("");
     try {
       const params = new URLSearchParams({ limit: "50" });
       if (memoryQuery.trim()) params.set("q", memoryQuery.trim());
       if (memoryCategory) params.set("category", memoryCategory);
-      const data = await request(apiBase, `/memory?${params.toString()}`);
+      const data = await request(apiBase, `/memory?${params.toString()}`, {
+        token: token.trim(),
+      });
       setMemories(data.memories || []);
+      if (Array.isArray(data.categories) && data.categories.length) {
+        setMemoryCategories(data.categories);
+      }
+      setMemoryLoaded(true);
     } catch (e) {
-      showError(e);
+      const authMessage = memoryAuthFailure(e);
+      if (authMessage) {
+        setMemories([]);
+        setMemoryLoaded(false);
+        setMemoryAuthError(authMessage);
+      } else {
+        showError(e);
+      }
     } finally {
       setBusy("");
     }
@@ -359,6 +489,7 @@ export default function AgentDesks({ apiBase = "" }) {
     setBusy("memory-create");
     setError("");
     setNotice("");
+    setMemoryAuthError("");
     try {
       await request(apiBase, "/memory", {
         method: "POST",
@@ -367,10 +498,22 @@ export default function AgentDesks({ apiBase = "" }) {
       });
       setMemoryText("");
       setNotice("Memory stored on the server.");
-      const data = await request(apiBase, "/memory?limit=50");
+      const data = await request(apiBase, "/memory?limit=50", {
+        token: token.trim(),
+      });
       setMemories(data.memories || []);
+      if (Array.isArray(data.categories) && data.categories.length) {
+        setMemoryCategories(data.categories);
+      }
+      setMemoryLoaded(true);
     } catch (e) {
-      showError(e);
+      const authMessage = memoryAuthFailure(e);
+      if (authMessage) {
+        setMemoryLoaded(false);
+        setMemoryAuthError(authMessage);
+      } else {
+        showError(e);
+      }
     } finally {
       setBusy("");
     }
@@ -389,23 +532,36 @@ export default function AgentDesks({ apiBase = "" }) {
       setMemories((current) => current.filter((item) => item.id !== id));
       setNotice("Memory deleted.");
     } catch (e) {
-      showError(e);
+      const authMessage = memoryAuthFailure(e);
+      if (authMessage) {
+        setMemoryAuthError(authMessage);
+      } else {
+        showError(e);
+      }
     } finally {
       setBusy("");
     }
   }
 
   async function testIntegration(id) {
+    if (!requireToken()) return;
     setBusy(`integration-${id}`);
     setError("");
     try {
       const data = await request(apiBase, `/integrations/${id}/test`, {
         method: "POST",
+        token: token.trim(),
       });
       setIntegrationResults((current) => ({ ...current, [id]: data }));
-      if (id === "ai_provider") await loadCore();
+      if (id === "ai_provider") await loadCore(token);
     } catch (e) {
-      showError(e);
+      const authMessage = protectedAuthFailure(e);
+      if (authMessage) {
+        setTaskAuthError(authMessage);
+        setError("");
+      } else {
+        showError(e);
+      }
     } finally {
       setBusy("");
     }
@@ -432,8 +588,11 @@ export default function AgentDesks({ apiBase = "" }) {
   const detail = agentDetail;
   const providerVerified = status?.provider?.verified === true;
   const providerConfigured = status?.provider?.configured === true;
+  const verifiedModel = status?.provider?.verification?.model;
   const providerLabel = providerVerified
-    ? "VERIFIED"
+    ? verifiedModel
+      ? `VERIFIED · ${verifiedModel}`
+      : "VERIFIED"
     : providerConfigured
       ? "CONFIGURED · NOT VERIFIED"
       : "NOT CONFIGURED";
@@ -443,6 +602,11 @@ export default function AgentDesks({ apiBase = "" }) {
       ? "EPHEMERAL"
       : status?.storage?.tasks?.mode || "UNKNOWN";
   const selectedTaskPreview = lastTask || null;
+  const approvalInbox = tasks.filter(
+    (task) =>
+      task.status === "AWAITING_APPROVAL" ||
+      task.approval?.status === "pending",
+  );
 
   const memoryCategoryOptions = useMemo(
     () =>
@@ -472,7 +636,7 @@ export default function AgentDesks({ apiBase = "" }) {
           <button
             type="button"
             className="gm-btn"
-            onClick={loadCore}
+            onClick={() => loadCore(token)}
             disabled={loading}
           >
             {loading ? "Refreshing…" : "↻ Refresh"}
@@ -517,7 +681,7 @@ export default function AgentDesks({ apiBase = "" }) {
         <div className="gm-notice danger" style={{ marginBottom: 14 }}>
           <strong>Approvals are disabled.</strong> The server has no
           <code> GRANDMASTER_CONTROL_TOKEN</code> (16+ chars), so approval,
-          memory mutation and audit requests are refused. This is intentional.
+          memory and audit requests are refused. This is intentional.
         </div>
       )}
 
@@ -532,10 +696,23 @@ export default function AgentDesks({ apiBase = "" }) {
           autoComplete="new-password"
           placeholder="Server-side GRANDMASTER_CONTROL_TOKEN"
           value={token}
-          onChange={(event) => setToken(event.target.value)}
+          onChange={(event) => {
+            const next = event.target.value;
+            setToken(next);
+            setTasks([]);
+            setTaskStats(null);
+            setChannels([]);
+            setAudit(null);
+            setMemories([]);
+            setMemoryLoaded(false);
+            setMemoryAuthError("");
+            setTaskAuthError("");
+          }}
         />
         <span className="gm-muted gm-small">
-          Held in component memory only. Never written to localStorage.
+          Enter the token, then select Refresh to load protected tasks and
+          notifications. Held in component memory only. Never written to
+          localStorage or sessionStorage.
         </span>
         <Pill tone={token.trim() ? "gold" : ""}>
           {token.trim() ? "TOKEN ENTERED" : "NO TOKEN"}
@@ -574,7 +751,7 @@ export default function AgentDesks({ apiBase = "" }) {
           <button
             type="button"
             className="gm-btn"
-            onClick={loadCore}
+            onClick={() => loadCore(token)}
             disabled={loading}
           >
             {loading ? "Retrying…" : "Retry"}
@@ -586,6 +763,11 @@ export default function AgentDesks({ apiBase = "" }) {
           {notice}
         </div>
       )}
+      {taskAuthError && (
+        <div className="gm-notice danger" role="alert" style={{ marginBottom: 14 }}>
+          {taskAuthError}
+        </div>
+      )}
 
       {loading && !status && (
         <div className="gm-card gm-empty">Loading agent operations data…</div>
@@ -593,6 +775,66 @@ export default function AgentDesks({ apiBase = "" }) {
 
       {tab === "agents" && (
         <section className="desk-section">
+          <div className="desk-section-head">
+            <div>
+              <h2>Mission desks</h2>
+              <p>
+                Five workspaces mapped to the agent registry and integration
+                registry. Status labels are evidence-based. Task counts come from
+                the local server store; no live market or publishing metrics are
+                shown.
+              </p>
+            </div>
+            <Pill tone={desks.length === 5 ? "gold" : "red"}>
+              {desks.length}/5 MAPPED
+            </Pill>
+          </div>
+
+          {!desks.length && !loading && (
+            <div className="gm-empty">
+              Desk summaries are unavailable from the backend. No substitute data
+              is shown.
+            </div>
+          )}
+
+          <div className="desk-mission-grid">
+            {desks.map((desk) => (
+              <article key={desk.id} className="gm-card desk-mission">
+                <div className="desk-mission-head">
+                  <strong>{desk.name}</strong>
+                  <Pill tone={LABEL_STYLE[desk.statusLabel] || ""}>
+                    {desk.statusLabel}
+                  </Pill>
+                </div>
+                <p className="desk-mission-boundary">{desk.boundary}</p>
+                <div className="desk-mission-meta">
+                  <Pill tone={GATE_STYLE[desk.gate] || ""}>{desk.gate}</Pill>
+                  <span>STORED TASKS: {desk.taskCount ?? 0}</span>
+                  <span>
+                    {desk.liveVerified ? "LIVE VERIFIED" : "NO LIVE METRICS"}
+                  </span>
+                </div>
+                <div className="desk-mission-agents">
+                  {(desk.agents || []).map((agentItem) => (
+                    <span key={agentItem.id} className="gm-muted gm-small">
+                      {agentItem.name}: {agentItem.statusLabel}
+                    </span>
+                  ))}
+                </div>
+                {desk.missingConfiguration?.length > 0 && (
+                  <div className="desk-missing">
+                    Missing: {desk.missingConfiguration.join(", ")}
+                  </div>
+                )}
+                {desk.approvalRequired && (
+                  <div className="desk-mission-approval">
+                    APPROVAL REQUIRED for consequential external actions.
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+
           <div className="desk-section-head">
             <div>
               <h2>Specialist registry</h2>
@@ -636,6 +878,9 @@ export default function AgentDesks({ apiBase = "" }) {
                     <Pill tone={statusTone(agent.status)}>
                       {String(agent.status || "UNKNOWN").replace(/_/g, " ").toUpperCase()}
                     </Pill>
+                    <Pill tone={LABEL_STYLE[agent.evidence?.label] || ""}>
+                      {agent.evidence?.label || "NOT VERIFIED"}
+                    </Pill>
                     <Pill tone={GATE_STYLE[agent.gate] || ""}>{agent.gate}</Pill>
                   </div>
                 </div>
@@ -665,11 +910,20 @@ export default function AgentDesks({ apiBase = "" }) {
                   <Pill tone={statusTone(detail.status)}>
                     {String(detail.status || "").replace(/_/g, " ").toUpperCase()}
                   </Pill>
+                  <Pill tone={LABEL_STYLE[detail.evidence?.label] || ""}>
+                    {detail.evidence?.label || "NOT VERIFIED"}
+                  </Pill>
                   <Pill tone={GATE_STYLE[detail.gate] || ""}>{detail.gate}</Pill>
                 </div>
               </div>
 
               <p className="gm-muted gm-small">{detail.statusReason}</p>
+              {detail.evidence?.detail &&
+                detail.evidence.detail !== detail.statusReason && (
+                  <p className="gm-muted gm-small">
+                    Evidence: {detail.evidence.detail}
+                  </p>
+                )}
 
               <div className="desk-detail-grid">
                 <div>
@@ -746,7 +1000,7 @@ export default function AgentDesks({ apiBase = "" }) {
                       <Pill tone={TASK_STATUS_STYLE[task.status] || ""}>
                         {task.status}
                       </Pill>
-                      <span className="desk-recent-request">{task.request}</span>
+                      <span className="desk-recent-request">Task {task.id}</span>
                       <span className="gm-muted gm-small">
                         {formatDate(task.createdAt)}
                       </span>
@@ -772,6 +1026,65 @@ export default function AgentDesks({ apiBase = "" }) {
             <button type="button" className="gm-btn" onClick={refreshTasks}>
               ↻ Refresh tasks
             </button>
+          </div>
+
+          <div className="gm-card desk-inbox">
+            <div className="gm-card-head">
+              <div>
+                <h2>Approval inbox</h2>
+                <p>
+                  Real tasks waiting for control authorization. Approving records
+                  the decision and queues the task; external execution remains NOT
+                  IMPLEMENTED.
+                </p>
+              </div>
+              <Pill tone={approvalInbox.length ? "gold" : "green"}>
+                {approvalInbox.length} WAITING
+              </Pill>
+            </div>
+            {!token.trim() && (
+              <div className="gm-muted gm-small">
+                Enter the control token and select Refresh tasks to load the
+                approval inbox.
+              </div>
+            )}
+            {token.trim() && !approvalInbox.length && (
+              <div className="gm-muted gm-small">
+                No tasks are waiting for approval.
+              </div>
+            )}
+            <div className="desk-inbox-list">
+              {approvalInbox.map((task) => (
+                <div key={task.id} className="desk-inbox-row">
+                  <div className="desk-inbox-main">
+                    <Pill tone="gold">AWAITING APPROVAL</Pill>
+                    <strong>{task.request}</strong>
+                    <span className="gm-muted gm-small">
+                      ID {task.id} · {task.agentId} · risk {task.risk} ·{" "}
+                      {formatDate(task.createdAt)}
+                    </span>
+                  </div>
+                  <div className="desk-inbox-actions">
+                    <button
+                      type="button"
+                      className="gm-btn primary"
+                      disabled={busy === `approve-${task.id}`}
+                      onClick={() => taskAction(task.id, "approve")}
+                    >
+                      Approve
+                    </button>
+                    <button
+                      type="button"
+                      className="gm-btn danger"
+                      disabled={busy === `cancel-${task.id}`}
+                      onClick={() => taskAction(task.id, "cancel")}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
 
           <form className="gm-card desk-form" onSubmit={submitTask}>
@@ -873,7 +1186,13 @@ export default function AgentDesks({ apiBase = "" }) {
 
           <div className="desk-task-list">
             {!tasks.length && !loading && (
-              <div className="gm-empty">No tasks recorded yet.</div>
+              <div className="gm-empty">
+                {taskAuthError
+                  ? "Tasks are locked. Enter a valid control token and select Refresh."
+                  : token.trim()
+                    ? "No tasks recorded yet."
+                    : "Enter the control token to load tasks and notifications."}
+              </div>
             )}
             {tasks.map((task) => {
               const canCancel = !["COMPLETED", "CANCELLED", "RUNNING"].includes(task.status);
@@ -992,8 +1311,8 @@ export default function AgentDesks({ apiBase = "" }) {
             <div>
               <h2>Persistent memory</h2>
               <p>
-                Stored by the backend. Secrets are rejected. Create, update and
-                delete require the control token.
+                Stored by the backend. Secrets are rejected. Listing, search,
+                create, update and delete all require the control token.
               </p>
             </div>
             {status?.storage?.memory && (
@@ -1006,6 +1325,22 @@ export default function AgentDesks({ apiBase = "" }) {
               </Pill>
             )}
           </div>
+
+          {!token.trim() && (
+            <div className="gm-notice" style={{ marginBottom: 14 }}>
+              Server memory is protected. Enter the control token above, then
+              select <strong>Load memories</strong> or search.
+            </div>
+          )}
+          {memoryAuthError && (
+            <div
+              className="gm-notice danger"
+              role="alert"
+              style={{ marginBottom: 14 }}
+            >
+              {memoryAuthError}
+            </div>
+          )}
 
           <form className="gm-card desk-form" onSubmit={addMemory}>
             <label htmlFor="desk-memory-text">New memory</label>
@@ -1066,14 +1401,32 @@ export default function AgentDesks({ apiBase = "" }) {
                 </option>
               ))}
             </select>
-            <button type="submit" className="gm-btn" disabled={busy === "memory-search"}>
+            <button
+              type="button"
+              className="gm-btn"
+              onClick={() => loadMemories()}
+              disabled={!token.trim() || busy === "memory-list"}
+            >
+              {busy === "memory-list" ? "Loading…" : "Load memories"}
+            </button>
+            <button
+              type="submit"
+              className="gm-btn"
+              disabled={!token.trim() || busy === "memory-search"}
+            >
               Search
             </button>
           </form>
 
           <div className="desk-memory-list">
             {!memories.length && !loading && (
-              <div className="gm-empty">No memories stored.</div>
+              <div className="gm-empty">
+                {memoryLoaded
+                  ? "No memories stored."
+                  : token.trim()
+                    ? "Memory list not loaded. Select Load memories."
+                    : "Enter the control token to load server memory."}
+              </div>
             )}
             {memories.map((memory) => (
               <div key={memory.id} className="gm-card desk-memory">
@@ -1330,6 +1683,20 @@ const deskCss = `
 .desk-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}
 .desk-section-head h2{margin:0;font-size:15px;font-weight:800}
 .desk-section-head p{margin:5px 0 0;font-size:11px;color:var(--muted);max-width:820px}
+.desk-mission-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.desk-mission{display:flex;flex-direction:column;gap:9px}
+.desk-mission-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.desk-mission-head strong{font-size:12px;line-height:1.4}
+.desk-mission-boundary{margin:0;font-size:11px;color:var(--muted);line-height:1.55}
+.desk-mission-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:9px;letter-spacing:.4px;color:#7d879c;font-weight:700}
+.desk-mission-agents{display:flex;flex-direction:column;gap:3px;border-top:1px solid var(--border);padding-top:8px}
+.desk-mission-approval{font-size:10px;color:var(--gold2);background:#f5bc4b0d;border:1px solid #f5bc4b26;border-radius:8px;padding:6px 8px}
+.desk-inbox{display:flex;flex-direction:column;gap:10px}
+.desk-inbox-list{display:flex;flex-direction:column;gap:8px}
+.desk-inbox-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;border:1px solid var(--border);border-radius:9px;padding:9px 10px;background:#ffffff03;flex-wrap:wrap}
+.desk-inbox-main{display:flex;flex-direction:column;gap:5px;flex:1;min-width:220px;font-size:11px}
+.desk-inbox-main strong{overflow-wrap:anywhere}
+.desk-inbox-actions{display:flex;gap:8px;flex-wrap:wrap}
 .desk-agent-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
 .desk-agent-card{display:flex;flex-direction:column;gap:8px;text-align:left;border:1px solid var(--border);background:linear-gradient(145deg,#121622,#0e111a);border-radius:13px;padding:14px;color:inherit;transition:.15s;min-height:190px}
 .desk-agent-card:hover{border-color:#f5bc4b66;transform:translateY(-1px)}

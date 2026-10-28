@@ -47,18 +47,27 @@ test("GET /status returns an honest envelope and never leaks the API key", async
   });
   assert.equal(response.status, 200);
   assert.equal(response.body.ok, true);
-  assert.equal(response.body.data.agents.total, 20);
+  assert.equal(response.body.data.agents.total, 21);
   assert.equal(response.body.data.phase, 3);
   assert.equal(response.body.data.limitations.length > 0, true);
   assert.equal(response.requestId, response.body.requestId);
   assert.ok(!JSON.stringify(response.body).includes(fakeKey));
 });
 
-test("GET /agents lists all 20 agents and an unknown agent is a 404", async () => {
+test("GET /agents lists all 21 agents and an unknown agent is a 404", async () => {
   const list = await call("GET", "/agents");
   assert.equal(list.status, 200);
-  assert.equal(list.body.data.count, 20);
-  assert.equal(list.body.data.agents.length, 20);
+  assert.equal(list.body.data.count, 21);
+  assert.equal(list.body.data.agents.length, 21);
+  assert.equal(list.body.data.desks.length, 5);
+  assert.deepEqual(
+    list.body.data.desks.map((desk) => desk.id),
+    ["mastermind", "mt5_monitor", "risk_manager", "communications", "social"],
+  );
+  assert.equal(
+    list.body.data.desks.every((desk) => desk.externalExecutionEnabled === false),
+    true,
+  );
 
   const detail = await call("GET", "/agents/mastermind");
   assert.equal(detail.status, 200);
@@ -80,14 +89,18 @@ test("plan validates input and rejects malformed JSON", async () => {
   assert.equal(empty.status, 400);
   assert.equal(empty.body.error.code, "REQUEST_REQUIRED");
 
-  const malformed = await call("POST", "/tasks", { body: "{" });
+  const malformed = await call("POST", "/tasks", {
+    headers: authorized,
+    body: "{",
+  });
   assert.equal(malformed.status, 400);
   assert.equal(malformed.body.error.code, "INVALID_JSON");
 });
 
 test("financial execution is locked by the API", async () => {
-  const before = await call("GET", "/tasks");
+  const before = await call("GET", "/tasks", { headers: authorized });
   const response = await call("POST", "/tasks", {
+    headers: authorized,
     body: { request: "withdraw funds from my account" },
   });
   assert.equal(response.status, 403);
@@ -95,12 +108,13 @@ test("financial execution is locked by the API", async () => {
   assert.equal(response.body.error.code, "ACTION_LOCKED");
   assert.ok(response.body.details.plan.steps.some((step) => step.status === "blocked"));
 
-  const afterTasks = await call("GET", "/tasks");
+  const afterTasks = await call("GET", "/tasks", { headers: authorized });
   assert.equal(afterTasks.body.data.tasks.length, before.body.data.tasks.length);
 });
 
 test("external action requires control token, fails honestly and enforces retry limit", async () => {
   const created = await call("POST", "/tasks", {
+    headers: authorized,
     body: { request: "publish this post on instagram now", idempotencyKey: "api-approval-1" },
   });
   assert.equal(created.status, 201);
@@ -108,6 +122,7 @@ test("external action requires control token, fails honestly and enforces retry 
   const taskId = created.body.data.task.id;
 
   const duplicate = await call("POST", "/tasks", {
+    headers: authorized,
     body: { request: "publish this post on instagram now", idempotencyKey: "api-approval-1" },
   });
   assert.equal(duplicate.status, 200);
@@ -129,23 +144,39 @@ test("external action requires control token, fails honestly and enforces retry 
   assert.equal(approved.status, 200);
   assert.equal(approved.body.data.task.status, "QUEUED");
 
-  const run = await call("POST", `/tasks/${taskId}/run`);
+  const run = await call("POST", `/tasks/${taskId}/run`, {
+    headers: authorized,
+  });
   assert.equal(run.status, 200);
   assert.equal(run.body.data.task.status, "FAILED");
   assert.equal(run.body.data.task.result, null);
   assert.equal(run.body.data.task.error.code, "EXTERNAL_ACTION_NOT_IMPLEMENTED");
 
-  const retry = await call("POST", `/tasks/${taskId}/retry`);
+  const retryDenied = await call("POST", `/tasks/${taskId}/retry`);
+  assert.equal(retryDenied.status, 403);
+  assert.equal(retryDenied.body.error.code, "APPROVAL_REQUIRED");
+
+  const retry = await call("POST", `/tasks/${taskId}/retry`, {
+    headers: authorized,
+  });
   assert.equal(retry.status, 200);
   assert.equal(retry.body.data.task.attempts, 2);
 
-  const limited = await call("POST", `/tasks/${taskId}/retry`);
+  const limited = await call("POST", `/tasks/${taskId}/retry`, {
+    headers: authorized,
+  });
   assert.equal(limited.status, 409);
   assert.equal(limited.body.error.code, "RETRY_LIMIT_REACHED");
 });
 
-test("task lookup returns 404 for unknown ids", async () => {
-  const response = await call("GET", "/tasks/00000000-0000-0000-0000-000000000000");
+test("task lookup requires a token and returns 404 for unknown ids", async () => {
+  const denied = await call("GET", "/tasks/00000000-0000-0000-0000-000000000000");
+  assert.equal(denied.status, 403);
+  assert.equal(denied.body.error.code, "APPROVAL_REQUIRED");
+
+  const response = await call("GET", "/tasks/00000000-0000-0000-0000-000000000000", {
+    headers: authorized,
+  });
   assert.equal(response.status, 404);
   assert.equal(response.body.error.code, "TASK_NOT_FOUND");
 });
@@ -174,7 +205,10 @@ test("memory create, search, update and delete are gated and audited", async () 
   assert.equal(created.status, 201);
   const memoryId = created.body.data.memory.id;
 
-  const found = await call("GET", "/memory", { query: { q: "evidence" } });
+  const found = await call("GET", "/memory", {
+    headers: authorized,
+    query: { q: "evidence" },
+  });
   assert.equal(found.status, 200);
   assert.ok(found.body.data.memories.some((item) => item.id === memoryId));
 
@@ -214,21 +248,35 @@ test("integrations report NOT CONNECTED and tests perform no external action", a
   );
   assert.equal(whatsapp.status, "not_connected");
 
-  const tested = await call("POST", "/integrations/whatsapp_business/test");
+  const testedDenied = await call("POST", "/integrations/whatsapp_business/test");
+  assert.equal(testedDenied.status, 403);
+  assert.equal(testedDenied.body.error.code, "APPROVAL_REQUIRED");
+
+  const tested = await call("POST", "/integrations/whatsapp_business/test", {
+    headers: authorized,
+  });
   assert.equal(tested.status, 200);
   assert.equal(tested.body.data.performed, false);
   assert.equal(tested.body.data.status, "not_connected");
 
-  const unknown = await call("POST", "/integrations/nope/test");
+  const unknown = await call("POST", "/integrations/nope/test", {
+    headers: authorized,
+  });
   assert.equal(unknown.status, 404);
 });
 
-test("security posture and notifications are available", async () => {
+test("security posture is public and notifications require authorization", async () => {
   const posture = await call("GET", "/security/posture");
   assert.equal(posture.status, 200);
   assert.ok(Array.isArray(posture.body.data.posture.lockedActions));
 
-  const notifications = await call("GET", "/notifications");
+  const denied = await call("GET", "/notifications");
+  assert.equal(denied.status, 403);
+  assert.equal(denied.body.error.code, "APPROVAL_REQUIRED");
+
+  const notifications = await call("GET", "/notifications", {
+    headers: authorized,
+  });
   assert.equal(notifications.status, 200);
   assert.equal(notifications.body.data.channels.find((c) => c.id === "in_app").status, "operational");
 });

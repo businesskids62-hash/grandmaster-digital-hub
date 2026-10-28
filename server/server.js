@@ -6,19 +6,25 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import {
+  CHAT_SYSTEM_PROMPT,
+  MAX_MESSAGE_CHARS,
   executeProviderRotation,
   getProviderStatusList,
+  getVerificationSnapshot,
   parseProviders,
+  providerHealthLabel,
+  sanitizeChatHistory,
   verifyProvider,
 } from "../lib/aiProviders.js";
 import { getAllowedOrigins } from "../lib/cors.js";
 import { handleV1 } from "../lib/api/v1.js";
-import { AGENT_REGISTRY } from "../lib/agents/registry.js";
-import { taskStore } from "../lib/tasks/taskStore.js";
+import {
+  checkHealthRateLimit,
+  createHealthReport,
+  healthRateLimitHeaders,
+} from "../lib/healthStatus.js";
 
 const PORT = Number(process.env.PORT) || 5000;
-const MAX_MESSAGE_CHARS = 8000;
-const MAX_HISTORY_ITEMS = 12;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_PER_MINUTE) || 60;
 
@@ -32,13 +38,13 @@ export function createApp() {
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     next();
   });
-  app.use(express.json({ limit: "45mb" }));
+  app.use(express.json({ limit: "64kb" }));
 
   const allowedOrigins = getAllowedOrigins(process.env);
   app.use(
     cors({
       origin(origin, callback) {
-        if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes("*")) {
+        if (!origin || allowedOrigins.includes(origin)) {
           return callback(null, true);
         }
         return callback(new Error("Origin not allowed by CORS."));
@@ -57,8 +63,10 @@ export function createApp() {
     );
 
     if (recent.length >= RATE_LIMIT_MAX) {
+      res.setHeader("Retry-After", "60");
       return res.status(429).json({
         error: "Too many requests. Please wait a minute and try again.",
+        retryAfter: 60,
       });
     }
 
@@ -67,35 +75,40 @@ export function createApp() {
     return next();
   }
 
-  app.get("/api/health", (_req, res) => {
-    const providers = parseProviders(process.env);
-    const statuses = getProviderStatusList(process.env);
-    const [primaryProvider, primaryModel] = (providers[0] || "").split(":");
-    const hasConfigured = statuses.some((s) => s.configured);
-    const storage = taskStore.status();
+  app.all("/api/health", (req, res) => {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      res.setHeader("Allow", "GET, HEAD");
+      return res.status(405).json({ error: "Method not allowed. Use GET." });
+    }
 
-    res.json({
-      ok: true,
-      status: "online",
-      uptime: Math.round(process.uptime()),
-      timestamp: new Date().toISOString(),
-      provider: primaryProvider || "gemini",
-      model: primaryModel || "configured-model",
-      aiConfigured: hasConfigured,
-      providersCount: providers.length,
-      agentsCount: AGENT_REGISTRY.length,
-      storage: {
-        mode: storage.mode,
-        durable: storage.durable,
-        ephemeral: storage.ephemeral,
-        writable: storage.writable,
-      },
+    const rate = checkHealthRateLimit(req.ip, process.env);
+    for (const [key, value] of Object.entries(healthRateLimitHeaders(rate))) {
+      res.setHeader(key, value);
+    }
+    res.setHeader("Cache-Control", "no-store");
+
+    if (!rate.allowed) {
+      return res.status(429).json({
+        ok: false,
+        error: "Too many health requests. Try again in a minute.",
+        code: "HEALTH_RATE_LIMITED",
+      });
+    }
+
+    const report = createHealthReport({
+      env: process.env,
+      uptime: process.uptime(),
     });
+    return res.status(report.statusCode).json(report.body);
   });
 
   // Providers list & status snapshot endpoint
   app.get("/api/ai/providers", (_req, res) => {
-    const providers = getProviderStatusList(process.env);
+    const snapshot = getVerificationSnapshot();
+    const providers = getProviderStatusList(process.env).map((item) => ({
+      ...item,
+      health: providerHealthLabel(item, snapshot),
+    }));
     res.json({
       providers,
       timestamp: new Date().toISOString(),
@@ -105,8 +118,14 @@ export function createApp() {
   // Real, meaningful provider verification (no "verified" claim on key presence alone).
   app.get("/api/ai/status", async (_req, res) => {
     const result = await verifyProvider(process.env);
+    const configured = result.providers?.some((item) => item.configured);
     return res.json({
       status: result.status,
+      health: configured
+        ? result.status === "verified"
+          ? "GREEN"
+          : "CAPABILITY NOT VERIFIED"
+        : "NOT CONNECTED",
       reason: result.reason || "",
       provider: result.provider || "gemini",
       model: result.model,
@@ -137,7 +156,10 @@ export function createApp() {
 
   app.post("/api/chat", rateLimit, async (req, res, next) => {
     try {
-      const { message, history } = req.body || {};
+      if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+        return res.status(400).json({ error: "Request body must be a JSON object." });
+      }
+      const { message, history } = req.body;
 
       if (typeof message !== "string" || !message.trim()) {
         return res
@@ -155,17 +177,12 @@ export function createApp() {
         return res.status(400).json({ error: "'history' must be an array." });
       }
 
-      const safeHistory = (history || [])
-        .slice(-MAX_HISTORY_ITEMS)
-        .filter((item) => item && typeof item.content === "string")
-        .map((item) => ({
-          role: item.role === "user" ? "user" : "assistant",
-          content: item.content.slice(0, MAX_MESSAGE_CHARS),
-        }));
+      const safeHistory = sanitizeChatHistory(history);
 
       const result = await executeProviderRotation({
         message: message.trim(),
         history: safeHistory,
+        systemPrompt: CHAT_SYSTEM_PROMPT,
         env: process.env,
       });
 

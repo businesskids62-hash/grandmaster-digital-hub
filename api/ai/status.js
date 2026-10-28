@@ -13,8 +13,14 @@ export default async function handler(req, res) {
   }
 
   const result = await verifyProvider(process.env, { timeoutMs: 10_000 });
+  const configured = result.providers?.some((item) => item.configured);
   return sendJson(res, 200, {
     status: result.status,
+    health: configured
+      ? result.status === "verified"
+        ? "GREEN"
+        : "CAPABILITY NOT VERIFIED"
+      : "NOT CONNECTED",
     reason: result.reason || "",
     provider: result.provider || "gemini",
     model: result.model,

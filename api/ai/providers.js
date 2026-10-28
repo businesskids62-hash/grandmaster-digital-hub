@@ -1,4 +1,8 @@
-import { getProviderStatusList } from "../../lib/aiProviders.js";
+import {
+  getProviderStatusList,
+  getVerificationSnapshot,
+  providerHealthLabel,
+} from "../../lib/aiProviders.js";
 import { prepare, sendJson } from "../../lib/vercelHttp.js";
 
 export default async function handler(req, res) {
@@ -10,8 +14,12 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed. Use GET." });
   }
 
+  const snapshot = getVerificationSnapshot();
   return sendJson(res, 200, {
-    providers: getProviderStatusList(process.env),
+    providers: getProviderStatusList(process.env).map((item) => ({
+      ...item,
+      health: providerHealthLabel(item, snapshot),
+    })),
     timestamp: new Date().toISOString(),
   });
 }
