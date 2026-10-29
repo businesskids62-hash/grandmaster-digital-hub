@@ -40,6 +40,10 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
         },
       },
+      watch: {
+        // SQLite writes would otherwise trigger a full page reload mid-request.
+        ignored: ["**/data/**", "**/*.db", "**/*.db-wal", "**/*.db-shm"],
+      },
     },
   };
 });

@@ -1,6 +1,6 @@
 # Grandmaster Digital Hub — Project Context
 
-Last updated: 2026-10-28
+Last updated: 2026-10-29
 
 This file is a debugging aid for humans and AI assistants. It lists structure,
 ports and environment variable **names only** — never values. It does not grant
@@ -12,6 +12,12 @@ Grandmaster Digital Hub is a private AI operations dashboard: chat with a
 provider-backed assistant, run agent workflows, inspect a 100-step roadmap,
 track tasks and memory, monitor a read-only MT5 bridge, drive an approval-gated
 browser operator, and check system health.
+
+It also ships **Grandmaster Academy** (Phase 1): a mobile-first, education-only
+trading academy at `/academy` with per-user student accounts, three seeded
+lessons, a server-scored quiz, progress streaks, and a PWA shell. Students can
+use only academy APIs; every admin/dashboard route is server-enforced admin-only.
+The academy never shows signals, profit claims, MT5 controls or trade actions.
 
 Honesty rules baked into the product:
 
@@ -31,10 +37,11 @@ Honesty rules baked into the product:
 | Local API | Node.js 24 (ESM), Express 5 (`server/server.js`) |
 | Serverless API | Vercel Node functions in `api/` sharing logic from `lib/` |
 | AI providers | `lib/aiProviders.js` (Gemini-compatible HTTP), retries, fallback model |
-| Persistence | JSON stores under `GRANDMASTER_DATA_DIR` (`/tmp` on Vercel = ephemeral) |
+| Persistence | JSON stores under `GRANDMASTER_DATA_DIR`; academy uses SQLite via `node:sqlite` (`lib/db`) |
 | MT5 bridge | Python, standard library only (`mt5_bridge/bridge.py`), loopback |
 | Tests | `node --test` suites in `tests/`, plus `scripts/test-suite.js` |
-| Auth | Signed HttpOnly session cookie (`gm_session`), server-side control token |
+| Auth | Signed HttpOnly session cookie (`gm_session`) with per-user v2 tokens; bcrypt hashes; roles admin/student |
+| Academy UI | `src/academy/*` (mobile-first CSS, one strings file, bottom nav, PWA) |
 
 ## Ports
 
@@ -54,6 +61,9 @@ resolution mismatch.
 api/                  Vercel serverless adapters (thin; session + CORS + JSON)
   ai/, ai-status.js, auth/, chat.js, diagnostics.js,
   health/, health.js, providers.js, v1/
+  auth/               login, signup, logout, session, forgot/reset/change-password, account
+  academy/[...path].js  Academy API adapter (student session, role "any")
+  admin/stats.js      Admin-only sign-in counters adapter
 server/server.js      Local Express app; mirrors the api/ routes
 lib/                  Shared backend logic
   aiProviders.js      Provider rotation, retries, budget, cached verification
@@ -61,19 +71,26 @@ lib/                  Shared backend logic
   subsystemHealth.js  AI / MT5 / storage subsystem reports
   logger.js           Structured event logging with codes and root causes
   diagnostics/        logStore.js, stack.js, report.js
-  auth/               Signed session, login/logout routes
+  auth/               Session, accounts, bcrypt passwords, CSRF, audit, guards
+  db/                 SQLite adapter, migrations, seed (node:sqlite)
+  academy/            Courses, lessons, quizzes, progress service
+  admin/stats.js      Sign-in counters shared by Express and Vercel
+  api/academy.js      Academy route handler shared by Express and Vercel
   operator/           Approval-gated browser operator
   tasks/, memory/, security/, storage/, integrations/, orchestrator/
 src/
   App.jsx             Dashboard, navigation, health wiring, debug pack UI
   pages/              HealthPage, AgentDesks, Mt5Monitor, BrowserOperator, ...
+  academy/            AcademyApp, Auth/Course/Account screens, strings.js, api.js, CSS
   utils/              debugPack.js (masking, copy/download), wakeWord.js
   agents/             Browser-side agent simulations (incl. SystemDoctor)
-  main.jsx            React entry
+  seo.js              Per-route title, description, canonical, OG and robots tags
+  main.jsx            React entry; routes /academy, /privacy, /terms, /support
+public/               PWA manifest, sw.js, offline.html, icons, robots.txt, sitemap.xml
 mt5_bridge/bridge.py  Read-only MT5 status bridge
 scripts/              test-suite.js, check-health.mjs, load-test.mjs, verify-deployment.js
-tests/                node:test regression suites
-data/                 Local JSON data when GRANDMASTER_DATA_DIR is unset
+tests/                node:test regression suites (incl. academy.test.js, seo.test.js)
+data/                 Local JSON data and academy.db when GRANDMASTER_DATA_DIR is unset
 dist/                 Production build output (generated)
 vercel.json           API passthrough, SPA fallback (supports /health), security headers
 ```
@@ -113,8 +130,20 @@ bridge itself can still be reachable.
 - Private AI status: `GET /api/ai/status` (`?force=1` runs one bounded live check).
 - Private chat: `POST /api/chat`.
 - Private Phase 3 API: `/api/v1/*`.
+- Private admin stats: `GET /api/admin/stats` (admin session only: signups,
+  totalLogins, uniqueSignedIn, today).
 - Private auth: `/api/auth/login`, `/api/auth/session`, `/api/auth/logout`.
+- Auth accounts: `POST /api/auth/signup`, `/forgot-password`, `/reset-password`,
+  `/change-password`, `DELETE /api/auth/account` (CSRF header for v2 sessions).
+- Academy (any signed-in account): `/api/academy/courses`, `/courses/:id`,
+  `/lessons/:id`, `POST /lessons/:id/complete`, `/quizzes/:id`,
+  `GET|POST /quizzes/:id/attempts`, `/progress`, `/profile`.
 - Private diagnostics: `GET /api/diagnostics?limit=50` (masked logs + statuses).
+- Academy UI routes: `/academy`, `/academy/login|signup|forgot|reset`,
+  `/academy/courses`, `/academy/courses/:id`, `/academy/lessons/:id`,
+  `/academy/quizzes/:id`, `/academy/progress`, `/academy/profile`,
+  `/privacy`, `/terms`, `/support`.
+- PWA assets: `/manifest.webmanifest`, `/sw.js`, `/offline.html`, `/icons/*`.
 
 ## Debugging tools
 
@@ -143,7 +172,10 @@ Do not paste values into issues, chat or logs.
 - `PORT`, `HOST`
 - `GRANDMASTER_DATA_DIR`
 - `GRANDMASTER_CONTROL_TOKEN`
-- `GRANDMASTER_UI_PASSWORD`, `GRANDMASTER_SESSION_SECRET`
+- `GRANDMASTER_UI_PASSWORD` (legacy fallback), `GRANDMASTER_SESSION_SECRET`
+- `ADMIN_EMAIL`, `ADMIN_PASSWORD` (first admin seed; names only)
+- `BCRYPT_ROUNDS`
+- `GRANDMASTER_DB_PATH` (academy SQLite file)
 - `AUTH_RATE_LIMIT_PER_MINUTE`
 - `GRANDMASTER_RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_PER_MINUTE`
 - `GRANDMASTER_LOG_SILENT`
@@ -213,16 +245,65 @@ Do not paste values into issues, chat or logs.
 8. **AI providers can be unavailable.** Quota, auth, model availability and
    timeouts surface as explicit error codes (`AI_QUOTA_EXCEEDED`,
    `AI_AUTH_FAILED`, `AI_MODEL_UNAVAILABLE`, `AI_TIMEOUT`, `ALL_PROVIDERS_FAILED`).
-9. **Auth is required for private routes.** Without `GRANDMASTER_UI_PASSWORD`
-   and `GRANDMASTER_SESSION_SECRET` the UI shows “auth not configured” (503) and
-   private endpoints refuse access.
+9. **Auth is required for private routes.** Without `GRANDMASTER_SESSION_SECRET`
+   the UI shows “auth not configured” (503) and private endpoints refuse access.
+   `ADMIN_EMAIL` + `ADMIN_PASSWORD` seed the first admin on startup.
 10. **Roadmap checkboxes are local.** They track intent in `localStorage`; they
     do not inspect source code or verify deployments.
+11. **Academy storage is SQLite.** `node:sqlite` keeps the file under
+    `GRANDMASTER_DB_PATH` / `GRANDMASTER_DATA_DIR`. On Vercel `/tmp` is
+    per-instance and ephemeral, so accounts and progress are not durable there
+    until a hosted database (Postgres/Supabase) is wired through `lib/db`.
+12. **Password reset email is mocked.** The reset token is returned as
+    `devResetToken` only outside production; no email provider is connected yet.
+    Tokens are single-use, hashed at rest and expire after 30 minutes.
+13. **PWA caches the shell only.** `public/sw.js` never caches `/api/` responses,
+    so account and progress data always come from the network.
+14. **Legacy owner login is migration-only.** Once `ADMIN_EMAIL` is set, the
+    shared `GRANDMASTER_UI_PASSWORD` login is disabled and per-user login is the
+    only path; the existing v1 admin session token stays valid until it expires.
 
 ## Verification commands
 
 ```bash
-npm test            # test-suite preflight + node --test suites
+npm test            # test-suite preflight + node --test suites (183 tests)
 npm run build       # production build
 npm run check       # probes the local health endpoint
 ```
+
+## Progress log
+
+### 2026-10-29 — Phase 1 Academy
+
+- Per-user accounts: bcrypt password hashes (`lib/auth/passwords.js`), v2
+  session tokens carrying user id + session_version, roles admin/student, CSRF
+  double-submit cookie for account/academy mutations, audit log with
+  allow-listed fields.
+- SQLite schema + migrations + idempotent seed (`lib/db`), one course
+  "Trading Basics", 3 lessons, 1 quiz, 5 questions with explanations.
+- Academy API (`/api/academy/*`) with server-side quiz scoring; answers never
+  sent before submit.
+- Mobile-first academy UI with bottom nav, theme toggle, one strings file, and
+  legal/support pages; PWA manifest, service worker (no API caching) and
+  offline page.
+- Vite now ignores SQLite `*.db*` files in its watcher, which previously caused
+  full page reloads during signup.
+- Tests: 159 → 175 (16 new in `tests/academy.test.js`); build passes.
+- Verified at 390×844 in Edge: landing, signup, courses, lesson, quiz 5/5,
+  progress 33%, profile, dark theme, privacy; no horizontal scroll; inputs 51px
+  and nav items 53px tall.
+
+### 2026-10-29 — Sign-in tracking and SEO
+
+- Migration v2 adds `login_events` (id, nullable user_id, created_at default
+  `datetime('now')`). Successful account logins and signup auto-logins insert a
+  row; failed attempts do not. Legacy owner-password login has no user row and
+  is not tracked.
+- Admin-only `GET /api/admin/stats` returns `signups`, `totalLogins`,
+  `uniqueSignedIn`, `today` (UTC date). Students get 403, anonymous 401.
+- SEO: `index.html` default title/description/canonical/OG tags, per-route tags
+  via `src/seo.js`, noindex on private screens, `public/robots.txt` and
+  `public/sitemap.xml` (placeholder origin). No prerendering yet.
+- Tests: 175 → 183 (3 sign-in/admin, 5 SEO); build passes.
+- Not deployed and not pushed. No email provider, payment or trading feature was
+  added; MT5 stays hidden and disabled in academy screens.

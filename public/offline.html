@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1220" />
+    <title>Offline | Grandmaster Academy</title>
+    <link rel="icon" type="image/png" href="/icons/icon-192.png" />
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: #0b1220;
+        color: #e8edf7;
+        font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+        text-align: center;
+      }
+      .card { max-width: 360px; }
+      img { width: 88px; height: 88px; border-radius: 20px; }
+      h1 { font-size: 1.4rem; margin: 18px 0 8px; }
+      p { color: #9aa7bd; line-height: 1.55; margin: 0 0 20px; }
+      button {
+        min-height: 48px;
+        width: 100%;
+        border: 0;
+        border-radius: 12px;
+        background: #f5c451;
+        color: #0b1220;
+        font-weight: 700;
+        font-size: 1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <img src="/icons/icon-192.png" alt="" />
+      <h1>You are offline</h1>
+      <p>
+        Lessons need a connection so your progress stays saved on the server.
+        Reconnect and try again.
+      </p>
+      <button type="button" onclick="window.location.reload()">Try again</button>
+    </main>
+  </body>
+</html>

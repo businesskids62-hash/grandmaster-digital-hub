@@ -11,7 +11,7 @@
     "check": "node scripts/check-health.mjs",
     "server": "cross-env PORT=8000 HOST=127.0.0.1 node server/server.js",
     "server:gen5": "node server.cjs",
-    "test": "node scripts/test-suite.js && node --test tests/aiProviders.test.js tests/core.test.js tests/api.test.js tests/agentOperations.test.js tests/security.test.js tests/memory.test.js tests/health.test.js tests/reliability.test.js tests/mt5.test.js tests/operator.test.js tests/operatorUi.test.js tests/diagnostics.test.js",
+    "test": "node scripts/test-suite.js && node --test tests/aiProviders.test.js tests/core.test.js tests/api.test.js tests/agentOperations.test.js tests/security.test.js tests/memory.test.js tests/health.test.js tests/reliability.test.js tests/mt5.test.js tests/operator.test.js tests/operatorUi.test.js tests/diagnostics.test.js tests/seo.test.js tests/academy.test.js",
     "test:operator": "node --test tests/operator.test.js",
     "test:operator:real": "node --test tests/operatorReal.test.js",
     "build": "vite build",
@@ -21,6 +21,7 @@
   "dependencies": {
     "@vercel/analytics": "^1.5.0",
     "@vercel/speed-insights": "^2.0.0",
+    "bcryptjs": "^3.0.3",
     "chart.js": "^4.4.7",
     "cors": "^2.8.6",
     "dotenv": "^18.0.8",

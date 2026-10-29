@@ -30,14 +30,23 @@ import {
   createMt5HealthReport,
   createStorageHealthReport,
 } from "../lib/subsystemHealth.js";
-import { handleLogin, handleLogout, handleSession } from "../lib/auth/routes.js";
+import {
+  handleChangePassword,
+  handleDeleteAccount,
+  handleForgotPassword,
+  handleLogin,
+  handleLogout,
+  handleResetPassword,
+  handleSession,
+  handleSignup,
+} from "../lib/auth/routes.js";
+import { handleAcademy } from "../lib/api/academy.js";
+import { handleAdminStats } from "../lib/admin/stats.js";
+import { getDatabase } from "../lib/db/index.js";
 import { logEvent } from "../lib/logger.js";
 import { createDiagnosticsReport } from "../lib/diagnostics/report.js";
-import {
-  authConfigProblem,
-  authConfigured,
-  readSessionFromHeaders,
-} from "../lib/auth/session.js";
+import { authConfigProblem, authConfigured } from "../lib/auth/session.js";
+import { isAdmin, resolveSession } from "../lib/auth/guards.js";
 
 const PORT = Number(process.env.PORT) || 8000;
 const HOST = process.env.HOST || "127.0.0.1";
@@ -149,7 +158,39 @@ export function createApp() {
         requestId: req.requestId,
       });
     }
-    const session = readSessionFromHeaders(req.headers, process.env);
+    const session = resolveSession(req.headers, process.env);
+    if (!session) {
+      return res.status(401).json({
+        ok: false,
+        code: "AUTH_REQUIRED",
+        error: "Authentication required.",
+        requestId: req.requestId,
+      });
+    }
+    if (!isAdmin(session)) {
+      return res.status(403).json({
+        ok: false,
+        code: "ROLE_FORBIDDEN",
+        error: "Admin access required.",
+        requestId: req.requestId,
+      });
+    }
+    req.session = session;
+    return next();
+  }
+
+  function academyGate(req, res, next) {
+    if (!authConfigured(process.env)) {
+      return res.status(503).json({
+        ok: false,
+        code: "AUTH_NOT_CONFIGURED",
+        error:
+          authConfigProblem(process.env) ||
+          "UI authentication is not configured on the server.",
+        requestId: req.requestId,
+      });
+    }
+    const session = resolveSession(req.headers, process.env);
     if (!session) {
       return res.status(401).json({
         ok: false,
@@ -162,8 +203,8 @@ export function createApp() {
     return next();
   }
 
-  app.all("/api/auth/login", (req, res) => {
-    const result = handleLogin({
+  app.all("/api/auth/login", async (req, res) => {
+    const result = await handleLogin({
       method: req.method,
       headers: req.headers,
       body: req.body,
@@ -192,8 +233,92 @@ export function createApp() {
     return sendResult(res, result);
   });
 
+  app.all("/api/auth/signup", (req, res) => {
+    const result = handleSignup({
+      method: req.method,
+      headers: req.headers,
+      body: req.body,
+      env: process.env,
+      clientKey: req.ip,
+      requestId: req.requestId,
+    });
+    return sendResult(res, result);
+  });
+
   app.all("/api/auth/logout", (req, res) => {
-    const result = handleLogout({ env: process.env, requestId: req.requestId });
+    const result = handleLogout({
+      headers: req.headers,
+      env: process.env,
+      requestId: req.requestId,
+    });
+    return sendResult(res, result);
+  });
+
+  app.all("/api/auth/forgot-password", (req, res) => {
+    const result = handleForgotPassword({
+      method: req.method,
+      headers: req.headers,
+      body: req.body,
+      env: process.env,
+      clientKey: req.ip,
+      requestId: req.requestId,
+    });
+    return sendResult(res, result);
+  });
+
+  app.all("/api/auth/reset-password", (req, res) => {
+    const result = handleResetPassword({
+      method: req.method,
+      headers: req.headers,
+      body: req.body,
+      env: process.env,
+      clientKey: req.ip,
+      requestId: req.requestId,
+    });
+    return sendResult(res, result);
+  });
+
+  app.all("/api/auth/change-password", (req, res) => {
+    const result = handleChangePassword({
+      method: req.method,
+      headers: req.headers,
+      body: req.body,
+      env: process.env,
+      requestId: req.requestId,
+    });
+    return sendResult(res, result);
+  });
+
+  app.all("/api/auth/account", (req, res) => {
+    const result = handleDeleteAccount({
+      method: req.method,
+      headers: req.headers,
+      body: req.body,
+      env: process.env,
+      requestId: req.requestId,
+    });
+    return sendResult(res, result);
+  });
+
+  app.all("/api/admin/stats", sessionGate, (req, res) => {
+    const result = handleAdminStats({
+      method: req.method,
+      headers: req.headers,
+      env: process.env,
+      requestId: req.requestId,
+    });
+    return sendResult(res, result);
+  });
+
+  app.use("/api/academy", academyGate, (req, res) => {
+    const result = handleAcademy({
+      method: req.method,
+      path: req.path,
+      headers: req.headers,
+      body: req.body,
+      env: process.env,
+      requestId: req.requestId,
+    });
     return sendResult(res, result);
   });
 
@@ -518,6 +643,15 @@ const isMain =
   import.meta.url === new URL(`file://${process.argv[1]}`).href;
 
 if (isMain) {
+  try {
+    // Apply migrations (including login_events) before the port opens.
+    getDatabase(process.env);
+    console.log("Account database ready.");
+  } catch {
+    console.warn(
+      "Account database unavailable at startup; private routes will report 503.",
+    );
+  }
   const app = createApp();
   const providers = parseProviders(process.env);
   const [primaryProvider, primaryModel] = (providers[0] || "").split(":");

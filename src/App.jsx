@@ -24,6 +24,7 @@ import {
   downloadFile,
   maskSecrets,
 } from "./utils/debugPack.js";
+import { useSeo } from "./seo.js";
 
 
 /* ==========================================================================
@@ -880,7 +881,14 @@ class ErrorBoundary extends Component {
 
 /* ----------------------------------- App ---------------------------------- */
 
+function readCsrfCookie() {
+  if (typeof document === "undefined") return "";
+  const match = document.cookie.match(/(?:^|;\s*)gm_csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 function AuthScreen({ state, error, busy, onSubmit }) {
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const configured = state !== "unconfigured" && state !== "error";
 
@@ -897,8 +905,8 @@ function AuthScreen({ state, error, busy, onSubmit }) {
         </div>
         <div className="gm-card-title">Sign in</div>
         <p className="gm-muted gm-small">
-          Private APIs require a signed session. The control token stays on the
-          server and is never sent to this page.
+          Admin access requires a signed session. Students sign in from the
+          Academy instead.
         </p>
         {state === "checking" ? (
           <p className="gm-muted">Checking session…</p>
@@ -906,12 +914,24 @@ function AuthScreen({ state, error, busy, onSubmit }) {
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              if (password.trim()) onSubmit(password);
+              if (password.trim()) onSubmit(email.trim(), password);
             }}
             style={{ display: "grid", gap: 10, marginTop: 14 }}
           >
+            <label className="gm-muted gm-small" htmlFor="gm-login-email">
+              Email (admin accounts)
+            </label>
+            <input
+              id="gm-login-email"
+              className="gm-field"
+              type="email"
+              autoComplete="username"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              disabled={busy}
+            />
             <label className="gm-muted gm-small" htmlFor="gm-login-password">
-              UI password
+              Password
             </label>
             <input
               id="gm-login-password"
@@ -928,6 +948,12 @@ function AuthScreen({ state, error, busy, onSubmit }) {
             </button>
           </form>
         ) : null}
+        <p className="gm-muted gm-small" style={{ marginTop: 14 }}>
+          Student?{" "}
+          <a href="/academy" style={{ color: "inherit", textDecoration: "underline" }}>
+            Open the Academy
+          </a>
+        </p>
         {error && (
           <div className="gm-notice danger" role="alert" style={{ marginTop: 14 }}>
             {error}
@@ -958,6 +984,12 @@ function App() {
       ? "health"
       : "overview";
   const [page, setPage] = useState(initialPage);
+  useSeo({
+    title: `${PAGE_TITLES[page] || "Command Center"} | Grandmaster Digital Hub`,
+    description: "Private operations dashboard for Grandmaster Digital Hub.",
+    path: page === "health" ? "/health" : "/",
+    robots: "noindex,nofollow",
+  });
   const [menuOpen, setMenuOpen] = useState(false);
   const [backend, setBackend] = useState("CHECKING");
   const [model, setModel] = useState(DEFAULT_MODEL);
@@ -1095,6 +1127,11 @@ function App() {
         });
         if (cancelled) return;
         if (response.ok) {
+          const body = await response.json().catch(() => null);
+          if (body?.user?.role === "student") {
+            window.location.replace("/academy");
+            return;
+          }
           setAuthState("ready");
           return;
         }
@@ -1102,7 +1139,7 @@ function App() {
           const body = await response.json().catch(() => null);
           setAuthError(
             body?.error ||
-              "UI authentication is not configured on the server (GRANDMASTER_UI_PASSWORD / GRANDMASTER_SESSION_SECRET).",
+              "UI authentication is not configured on the server (GRANDMASTER_SESSION_SECRET, ADMIN_EMAIL / ADMIN_PASSWORD).",
           );
           setAuthState("unconfigured");
           return;
@@ -1119,17 +1156,21 @@ function App() {
     };
   }, []);
 
-  const signIn = useCallback(async (password) => {
+  const signIn = useCallback(async (email, password) => {
     setAuthBusy(true);
     setAuthError("");
     try {
       const response = await fetch(`${API_BASE}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify(email ? { email, password } : { password }),
       });
       const body = await response.json().catch(() => null);
       if (response.ok) {
+        if (body?.user?.role === "student") {
+          window.location.replace("/academy");
+          return true;
+        }
         setAuthState("ready");
         return true;
       }
@@ -1139,7 +1180,7 @@ function App() {
         setAuthError(body?.error || "UI authentication is not configured.");
         setAuthState("unconfigured");
       } else if (response.status === 401) {
-        setAuthError("Password ghalat hai.");
+        setAuthError("Email ya password ghalat hai.");
       } else {
         setAuthError(body?.error || "Sign in fail ho gaya.");
       }
@@ -1154,7 +1195,11 @@ function App() {
 
   const signOut = useCallback(async () => {
     try {
-      await fetch(`${API_BASE}/api/auth/logout`, { method: "POST" });
+      const csrf = readCsrfCookie();
+      await fetch(`${API_BASE}/api/auth/logout`, {
+        method: "POST",
+        headers: csrf ? { "X-CSRF-Token": csrf } : {},
+      });
     } catch {}
     setAuthState("required");
     setAuthError("");

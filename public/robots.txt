@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /api/
+Disallow: /health
+Disallow: /academy/profile
+Disallow: /academy/progress
+Disallow: /academy/courses
+Disallow: /academy/lessons
+Disallow: /academy/quizzes
+Disallow: /academy/forgot
+Disallow: /academy/reset
+
+Sitemap: https://YOUR-DOMAIN.com/sitemap.xml
