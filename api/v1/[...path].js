@@ -16,7 +16,7 @@ export default async function handler(req, res) {
   const { requestId, clientKey } = prepare(req, res, process.env);
   if (isResponseClosed(res)) return;
 
-  if (!requireSession(req, res, process.env, requestId)) return;
+  if (!(await requireSession(req, res, process.env, requestId))) return;
 
   const url = new URL(req.url || "/", "http://localhost");
   const path = url.pathname.replace(/^\/api\/v1/, "") || "/";

@@ -14,7 +14,7 @@ export default async function handler(req, res) {
   const { requestId } = prepare(req, res, process.env);
   if (res.writableEnded) return;
 
-  const result = handleDeleteAccount({
+  const result = await handleDeleteAccount({
     method: req.method,
     headers: req.headers || {},
     body: parsedBody(req.body),

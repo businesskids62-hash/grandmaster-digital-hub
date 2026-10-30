@@ -10,6 +10,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed. Use GET.", requestId });
   }
 
-  const result = handleSession({ headers: req.headers || {}, env: process.env, requestId });
+  const result = await handleSession({ headers: req.headers || {}, env: process.env, requestId });
   return sendJson(res, result.status, result.body, result.headers);
 }

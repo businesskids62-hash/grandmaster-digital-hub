@@ -5,10 +5,10 @@ export default async function handler(req, res) {
   const { requestId } = prepare(req, res, process.env);
   if (res.writableEnded) return;
 
-  const session = requireSession(req, res, process.env, requestId);
+  const session = await requireSession(req, res, process.env, requestId);
   if (!session) return;
 
-  const result = handleAdminStats({
+  const result = await handleAdminStats({
     method: req.method,
     headers: req.headers || {},
     env: process.env,

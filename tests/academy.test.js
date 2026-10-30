@@ -134,18 +134,20 @@ function fakeRes() {
 
 const db = getDatabase(process.env);
 
-after(() => {
-  closeDatabase();
+after(async () => {
+  await closeDatabase();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-test("migrations create the academy schema and seed one course with a quiz", () => {
-  const versions = db.all("SELECT version FROM schema_migrations").map((row) => row.version);
+test("migrations create the academy schema and seed one course with a quiz", async () => {
+  const versions = (await db.all("SELECT version FROM schema_migrations")).map(
+    (row) => row.version,
+  );
   assert.equal(versions.length, MIGRATIONS.length);
 
-  const tables = db
-    .all("SELECT name FROM sqlite_master WHERE type = 'table'")
-    .map((row) => row.name);
+  const tables = (await db.all("SELECT name FROM sqlite_master WHERE type = 'table'")).map(
+    (row) => row.name,
+  );
   for (const table of [
     "users",
     "password_resets",
@@ -161,23 +163,23 @@ test("migrations create the academy schema and seed one course with a quiz", () 
     assert.ok(tables.includes(table), `missing table ${table}`);
   }
 
-  assert.equal(db.get("SELECT COUNT(*) AS c FROM courses").c, 1);
-  assert.equal(db.get("SELECT COUNT(*) AS c FROM lessons").c, 3);
-  assert.equal(db.get("SELECT COUNT(*) AS c FROM quizzes").c, 1);
-  assert.equal(db.get("SELECT COUNT(*) AS c FROM questions").c, 5);
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM courses")).c, 1);
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM lessons")).c, 3);
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM quizzes")).c, 1);
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM questions")).c, 5);
 
-  const course = db.get("SELECT title, slug FROM courses WHERE id = ?", [SEED_IDS.course]);
+  const course = await db.get("SELECT title, slug FROM courses WHERE id = ?", [SEED_IDS.course]);
   assert.equal(course.title, "Trading Basics");
   assert.equal(course.slug, "trading-basics");
 
-  const status = databaseStatus(process.env);
+  const status = await databaseStatus(process.env);
   assert.equal(status.ok, true);
   assert.equal(status.engine, "sqlite");
   assert.equal(status.migrations, MIGRATIONS.length);
 });
 
 test("seeded admin uses a bcrypt hash and per-user login replaces the shared password", async () => {
-  const admin = db.get("SELECT * FROM users WHERE email = ?", ["owner@example.com"]);
+  const admin = await db.get("SELECT * FROM users WHERE email = ?", ["owner@example.com"]);
   assert.ok(admin);
   assert.equal(admin.role, "admin");
   assert.match(admin.password_hash, /^\$2[aby]\$/);
@@ -209,7 +211,7 @@ test("password hashing never stores plaintext and enforces a minimum length", ()
 
 test("signup creates a student session, rejects weak input and never confirms duplicates", async () => {
   resetAuthRateLimits();
-  const created = signup("Student.One@Example.com");
+  const created = await signup("Student.One@Example.com");
   assert.equal(created.status, 201);
   assert.equal(created.body.user.role, "student");
   assert.equal(created.body.user.email, "student.one@example.com");
@@ -226,23 +228,23 @@ test("signup creates a student session, rejects weak input and never confirms du
     /HttpOnly/i,
   );
 
-  const row = db.get("SELECT password_hash FROM users WHERE email = ?", [
+  const row = await db.get("SELECT password_hash FROM users WHERE email = ?", [
     "student.one@example.com",
   ]);
   assert.match(row.password_hash, /^\$2[aby]\$/);
   assert.notEqual(row.password_hash, "student-password-1");
 
-  const duplicate = signup("student.one@example.com");
+  const duplicate = await signup("student.one@example.com");
   assert.equal(duplicate.status, 200);
   assert.equal(duplicate.body.code, "SIGNUP_UNAVAILABLE");
   assert.equal(duplicate.body.user, undefined);
   assert.doesNotMatch(duplicate.body.error, /already|exists|taken/i);
 
-  const weak = signup("weak.password@example.com", "short");
+  const weak = await signup("weak.password@example.com", "short");
   assert.equal(weak.status, 400);
   assert.equal(weak.body.code, "WEAK_PASSWORD");
 
-  const badEmail = signup("not-an-email", "student-password-1");
+  const badEmail = await signup("not-an-email", "student-password-1");
   assert.equal(badEmail.status, 400);
   assert.equal(badEmail.body.code, "INVALID_EMAIL");
 });
@@ -255,7 +257,11 @@ test("login, session and logout round trip with generic credential errors", asyn
   assert.equal(good.body.user.role, "student");
   const { cookie } = cookiesFrom(good);
 
-  const session = handleSession({ headers: { cookie }, env: process.env, requestId: "session-ok" });
+  const session = await handleSession({
+    headers: { cookie },
+    env: process.env,
+    requestId: "session-ok",
+  });
   assert.equal(session.status, 200);
   assert.equal(session.body.user.role, "student");
 
@@ -266,10 +272,10 @@ test("login, session and logout round trip with generic credential errors", asyn
   assert.equal(wrong.body.error, unknown.body.error);
   assert.doesNotMatch(wrong.body.error, /not found|unknown|exists/i);
 
-  const denied = handleSession({ headers: {}, env: process.env, requestId: "session-none" });
+  const denied = await handleSession({ headers: {}, env: process.env, requestId: "session-none" });
   assert.equal(denied.status, 401);
 
-  const logout = handleLogout({ headers: { cookie }, env: process.env, requestId: "logout" });
+  const logout = await handleLogout({ headers: { cookie }, env: process.env, requestId: "logout" });
   assert.equal(logout.status, 200);
   const cleared = rawCookies(logout).join("\n");
   assert.match(cleared, /gm_session=;/);
@@ -279,25 +285,23 @@ test("login, session and logout round trip with generic credential errors", asyn
 
 test("successful sign-ins are recorded and failed attempts are not", async () => {
   const email = "tracked.learner@example.com";
-  const before = Number(db.get("SELECT COUNT(*) AS c FROM login_events").c);
+  const before = Number((await db.get("SELECT COUNT(*) AS c FROM login_events")).c);
 
-  assert.equal(signup(email).status, 201);
-  const userId = db.get("SELECT id FROM users WHERE email = ?", [email]).id;
-  const countForUser = () =>
-    Number(
-      db.get("SELECT COUNT(*) AS c FROM login_events WHERE user_id = ?", [userId]).c,
-    );
-  assert.equal(countForUser(), 1);
+  assert.equal((await signup(email)).status, 201);
+  const userId = (await db.get("SELECT id FROM users WHERE email = ?", [email])).id;
+  const countForUser = async () =>
+    Number((await db.get("SELECT COUNT(*) AS c FROM login_events WHERE user_id = ?", [userId])).c);
+  assert.equal(await countForUser(), 1);
 
   assert.equal((await login(email)).status, 200);
-  assert.equal(countForUser(), 2);
+  assert.equal(await countForUser(), 2);
 
-  const afterSuccess = Number(db.get("SELECT COUNT(*) AS c FROM login_events").c);
+  const afterSuccess = Number((await db.get("SELECT COUNT(*) AS c FROM login_events")).c);
   assert.equal((await login(email, "wrong-password-value")).status, 401);
-  assert.equal(Number(db.get("SELECT COUNT(*) AS c FROM login_events").c), afterSuccess);
+  assert.equal(Number((await db.get("SELECT COUNT(*) AS c FROM login_events")).c), afterSuccess);
   assert.equal(afterSuccess, before + 2);
 
-  const latest = db.get(
+  const latest = await db.get(
     "SELECT created_at FROM login_events WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
     [userId],
   );
@@ -305,7 +309,7 @@ test("successful sign-ins are recorded and failed attempts are not", async () =>
 });
 
 test("admin stats are admin-only and report sign-in totals", async () => {
-  const anonymous = handleAdminStats({
+  const anonymous = await handleAdminStats({
     method: "GET",
     headers: {},
     env: process.env,
@@ -315,7 +319,7 @@ test("admin stats are admin-only and report sign-in totals", async () => {
 
   const student = await login("student.one@example.com");
   const { cookie: studentCookie } = cookiesFrom(student);
-  const forbidden = handleAdminStats({
+  const forbidden = await handleAdminStats({
     method: "GET",
     headers: { cookie: studentCookie },
     env: process.env,
@@ -327,7 +331,7 @@ test("admin stats are admin-only and report sign-in totals", async () => {
   const admin = await login("owner@example.com", "owner-password-123");
   assert.equal(admin.status, 200);
   const { cookie: adminCookie } = cookiesFrom(admin);
-  const stats = handleAdminStats({
+  const stats = await handleAdminStats({
     method: "GET",
     headers: { cookie: adminCookie },
     env: process.env,
@@ -336,26 +340,28 @@ test("admin stats are admin-only and report sign-in totals", async () => {
   assert.equal(stats.status, 200);
   assert.equal(stats.body.ok, true);
 
-  const expected = readSignInStats(db);
+  const expected = await readSignInStats(db);
   for (const key of ["signups", "totalLogins", "uniqueSignedIn", "today"]) {
     assert.equal(stats.body[key], expected[key]);
     assert.equal(Number.isInteger(stats.body[key]), true);
   }
   assert.equal(
     stats.body.signups,
-    Number(db.get("SELECT COUNT(*) AS c FROM users").c),
+    Number((await db.get("SELECT COUNT(*) AS c FROM users")).c),
   );
   assert.equal(
     stats.body.uniqueSignedIn,
     Number(
-      db.get(
-        "SELECT COUNT(DISTINCT user_id) AS c FROM login_events WHERE user_id IS NOT NULL",
+      (
+        await db.get(
+          "SELECT COUNT(DISTINCT user_id) AS c FROM login_events WHERE user_id IS NOT NULL",
+        )
       ).c,
     ),
   );
   assert.ok(stats.body.today >= 1);
 
-  const post = handleAdminStats({
+  const post = await handleAdminStats({
     method: "POST",
     headers: { cookie: adminCookie },
     env: process.env,
@@ -397,7 +403,7 @@ test("Express exposes admin stats only to an admin session", async () => {
 });
 
 test("session tokens reject tampering and expiry", async () => {
-  const user = db.get("SELECT * FROM users WHERE email = ?", ["student.one@example.com"]);
+  const user = await db.get("SELECT * FROM users WHERE email = ?", ["student.one@example.com"]);
   const token = createUserSessionToken(user, process.env);
   const verified = verifySessionToken(token, process.env);
   assert.equal(verified.userId, user.id);
@@ -421,22 +427,26 @@ test("session tokens reject tampering and expiry", async () => {
 test("students are blocked from admin routes but can use the academy", async () => {
   const signedIn = await login("student.one@example.com");
   const { cookie } = cookiesFrom(signedIn);
-  const session = resolveSession({ cookie }, process.env);
+  const session = await resolveSession({ cookie }, process.env);
   assert.equal(isAdmin(session), false);
 
   const denied = fakeRes();
-  const blocked = requireSession({ headers: { cookie } }, denied, process.env, "role-check");
+  const blocked = await requireSession({ headers: { cookie } }, denied, process.env, "role-check");
   assert.equal(blocked, null);
   assert.equal(denied.statusCode, 403);
   assert.equal(denied.body.code, "ROLE_FORBIDDEN");
 
   const allowed = fakeRes();
-  const studentSession = requireSession({ headers: { cookie } }, allowed, process.env, "any-check", {
-    role: "any",
-  });
+  const studentSession = await requireSession(
+    { headers: { cookie } },
+    allowed,
+    process.env,
+    "any-check",
+    { role: "any" },
+  );
   assert.equal(studentSession.role, "student");
 
-  const academy = handleAcademy({
+  const academy = await handleAcademy({
     method: "GET",
     path: "/courses",
     headers: { cookie },
@@ -447,7 +457,7 @@ test("students are blocked from admin routes but can use the academy", async () 
   assert.equal(academy.body.courses.length, 1);
   assert.equal(academy.body.courses[0].title, "Trading Basics");
 
-  const anonymous = handleAcademy({
+  const anonymous = await handleAcademy({
     method: "GET",
     path: "/courses",
     headers: {},
@@ -457,7 +467,7 @@ test("students are blocked from admin routes but can use the academy", async () 
   assert.equal(anonymous.status, 401);
 
   const legacyToken = createSessionToken(process.env);
-  const legacy = handleAcademy({
+  const legacy = await handleAcademy({
     method: "GET",
     path: "/courses",
     headers: { cookie: `${SESSION_COOKIE_NAME}=${legacyToken}` },
@@ -506,13 +516,21 @@ test("rate limits and per-account lockout stop repeated attempts", async () => {
   assert.equal(blocked.retryAfter, 60);
   assert.equal(checkAuthRateLimit("rate-client", limited, start + 61_000).allowed, true);
 
-  assert.equal(signup("lockout@example.com").status, 201);
+  assert.equal((await signup("lockout@example.com")).status, 201);
   const moment = Date.now();
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const result = authenticateUser({ email: "lockout@example.com", password: "wrong-pass" }, process.env, moment);
+    const result = await authenticateUser(
+      { email: "lockout@example.com", password: "wrong-pass" },
+      process.env,
+      moment,
+    );
     assert.equal(result.status, 401);
   }
-  const locked = authenticateUser({ email: "lockout@example.com", password: "student-password-1" }, process.env, moment);
+  const locked = await authenticateUser(
+    { email: "lockout@example.com", password: "student-password-1" },
+    process.env,
+    moment,
+  );
   assert.equal(locked.status, 429);
   assert.equal(locked.code, "AUTH_LOCKED");
   assert.ok(locked.retryAfter > 0);
@@ -520,45 +538,45 @@ test("rate limits and per-account lockout stop repeated attempts", async () => {
 
 test("password reset tokens are single use, expiring and version-bumping", async () => {
   const email = "reset.learner@example.com";
-  assert.equal(signup(email).status, 201);
+  assert.equal((await signup(email)).status, 201);
 
   const before = await login(email);
   const { cookie } = cookiesFrom(before);
-  assert.ok(resolveSession({ cookie }, process.env));
+  assert.ok(await resolveSession({ cookie }, process.env));
 
-  const request = createPasswordReset(email, process.env);
+  const request = await createPasswordReset(email, process.env);
   assert.ok(request.devToken);
 
-  const used = consumePasswordReset(request.devToken, "replacement-password-1", process.env);
+  const used = await consumePasswordReset(request.devToken, "replacement-password-1", process.env);
   assert.equal(used.ok, true);
 
-  const reused = consumePasswordReset(request.devToken, "another-password-x1", process.env);
+  const reused = await consumePasswordReset(request.devToken, "another-password-x1", process.env);
   assert.equal(reused.code, "RESET_INVALID");
 
   // The reset bumped session_version, so the earlier session is dead.
-  assert.equal(resolveSession({ cookie }, process.env), null);
+  assert.equal(await resolveSession({ cookie }, process.env), null);
 
   const relogin = await login(email, "replacement-password-1");
   assert.equal(relogin.status, 200);
 
-  const expiring = createPasswordReset(email, process.env);
+  const expiring = await createPasswordReset(email, process.env);
   assert.ok(expiring.devToken);
   const tokenHash = createHash("sha256").update(expiring.devToken).digest("hex");
-  db.run("UPDATE password_resets SET expires_at = ? WHERE token_hash = ?", [
+  await db.run("UPDATE password_resets SET expires_at = ? WHERE token_hash = ?", [
     new Date(Date.now() - 1000).toISOString(),
     tokenHash,
   ]);
-  const expired = consumePasswordReset(expiring.devToken, "expired-password-1", process.env);
+  const expired = await consumePasswordReset(expiring.devToken, "expired-password-1", process.env);
   assert.equal(expired.code, "RESET_INVALID");
 
-  assert.equal(signup("prod.reset@example.com").status, 201);
-  const production = createPasswordReset("prod.reset@example.com", {
+  assert.equal((await signup("prod.reset@example.com")).status, 201);
+  const production = await createPasswordReset("prod.reset@example.com", {
     ...process.env,
     NODE_ENV: "production",
   });
   assert.equal(production.devToken, undefined);
 
-  const unknown = handleForgotPassword({
+  const unknown = await handleForgotPassword({
     method: "POST",
     headers: {},
     body: { email: "missing.account@example.com" },
@@ -569,7 +587,7 @@ test("password reset tokens are single use, expiring and version-bumping", async
   assert.equal(unknown.status, 200);
   assert.equal(unknown.body.devResetToken, undefined);
 
-  const resetRoute = handleResetPassword({
+  const resetRoute = await handleResetPassword({
     method: "POST",
     headers: {},
     body: { token: "not-a-real-token", newPassword: "whatever-pass-1" },
@@ -583,11 +601,11 @@ test("password reset tokens are single use, expiring and version-bumping", async
 
 test("password change requires the current password and invalidates old sessions", async () => {
   const email = "change.learner@example.com";
-  assert.equal(signup(email).status, 201);
+  assert.equal((await signup(email)).status, 201);
   const signedIn = await login(email);
   const { cookie, csrf } = cookiesFrom(signedIn);
 
-  const noCsrf = handleChangePassword({
+  const noCsrf = await handleChangePassword({
     method: "POST",
     headers: { cookie },
     body: { currentPassword: "student-password-1", newPassword: "changed-password-1" },
@@ -597,7 +615,7 @@ test("password change requires the current password and invalidates old sessions
   assert.equal(noCsrf.status, 403);
   assert.equal(noCsrf.body.code, "CSRF_INVALID");
 
-  const wrongCurrent = handleChangePassword({
+  const wrongCurrent = await handleChangePassword({
     method: "POST",
     headers: { cookie, "x-csrf-token": csrf },
     body: { currentPassword: "not-the-password", newPassword: "changed-password-1" },
@@ -606,7 +624,7 @@ test("password change requires the current password and invalidates old sessions
   });
   assert.equal(wrongCurrent.status, 401);
 
-  const changed = handleChangePassword({
+  const changed = await handleChangePassword({
     method: "POST",
     headers: { cookie, "x-csrf-token": csrf },
     body: { currentPassword: "student-password-1", newPassword: "changed-password-1" },
@@ -615,26 +633,26 @@ test("password change requires the current password and invalidates old sessions
   });
   assert.equal(changed.status, 200);
 
-  assert.equal(resolveSession({ cookie }, process.env), null);
+  assert.equal(await resolveSession({ cookie }, process.env), null);
   assert.equal((await login(email, "student-password-1")).status, 401);
   assert.equal((await login(email, "changed-password-1")).status, 200);
 });
 
 test("account deletion checks the password and removes personal rows", async () => {
   const email = "delete.learner@example.com";
-  assert.equal(signup(email).status, 201);
+  assert.equal((await signup(email)).status, 201);
   const signedIn = await login(email);
   const { cookie, csrf } = cookiesFrom(signedIn);
   const userId = signedIn.body.user.id;
 
-  completeLesson(db, userId, SEED_IDS.lessons[0]);
-  submitQuizAttempt(db, userId, SEED_IDS.quiz, Object.fromEntries(SEED_IDS.questions.map((id) => [id, 1])));
+  await completeLesson(db, userId, SEED_IDS.lessons[0]);
+  await submitQuizAttempt(db, userId, SEED_IDS.quiz, Object.fromEntries(SEED_IDS.questions.map((id) => [id, 1])));
 
   const before = Number(
-    db.get("SELECT COUNT(*) AS c FROM audit_log WHERE user_id IS NULL AND action = 'signup'").c,
+    (await db.get("SELECT COUNT(*) AS c FROM audit_log WHERE user_id IS NULL AND action = 'signup'")).c,
   );
 
-  const wrong = handleDeleteAccount({
+  const wrong = await handleDeleteAccount({
     method: "DELETE",
     headers: { cookie, "x-csrf-token": csrf },
     body: { password: "not-the-password" },
@@ -643,7 +661,7 @@ test("account deletion checks the password and removes personal rows", async () 
   });
   assert.equal(wrong.status, 401);
 
-  const deleted = handleDeleteAccount({
+  const deleted = await handleDeleteAccount({
     method: "DELETE",
     headers: { cookie, "x-csrf-token": csrf },
     body: { password: "student-password-1" },
@@ -652,15 +670,15 @@ test("account deletion checks the password and removes personal rows", async () 
   });
   assert.equal(deleted.status, 200);
 
-  assert.equal(db.get("SELECT id FROM users WHERE id = ?", [userId]), undefined);
-  assert.equal(db.get("SELECT COUNT(*) AS c FROM progress WHERE user_id = ?", [userId]).c, 0);
-  assert.equal(db.get("SELECT COUNT(*) AS c FROM quiz_attempts WHERE user_id = ?", [userId]).c, 0);
-  assert.equal(db.get("SELECT COUNT(*) AS c FROM password_resets WHERE user_id = ?", [userId]).c, 0);
-  assert.equal(db.get("SELECT COUNT(*) AS c FROM login_events WHERE user_id = ?", [userId]).c, 0);
+  assert.equal(await db.get("SELECT id FROM users WHERE id = ?", [userId]), undefined);
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM progress WHERE user_id = ?", [userId])).c, 0);
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM quiz_attempts WHERE user_id = ?", [userId])).c, 0);
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM password_resets WHERE user_id = ?", [userId])).c, 0);
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM login_events WHERE user_id = ?", [userId])).c, 0);
 
   // The security trail survives, detached from the deleted identity.
   const afterCount = Number(
-    db.get("SELECT COUNT(*) AS c FROM audit_log WHERE user_id IS NULL AND action = 'signup'").c,
+    (await db.get("SELECT COUNT(*) AS c FROM audit_log WHERE user_id IS NULL AND action = 'signup'")).c,
   );
   assert.equal(afterCount, before + 1);
 
@@ -670,10 +688,10 @@ test("account deletion checks the password and removes personal rows", async () 
 
 test("quiz answers stay server-side and scoring is computed on the server", async () => {
   const email = "quiz.learner@example.com";
-  assert.equal(signup(email).status, 201);
+  assert.equal((await signup(email)).status, 201);
   const userId = (await login(email)).body.user.id;
 
-  const quiz = getQuizForClient(db, SEED_IDS.quiz);
+  const quiz = await getQuizForClient(db, SEED_IDS.quiz);
   assert.equal(quiz.questions.length, 5);
   for (const question of quiz.questions) {
     assert.equal(question.options.length, 4);
@@ -682,7 +700,7 @@ test("quiz answers stay server-side and scoring is computed on the server", asyn
   }
 
   const allCorrect = Object.fromEntries(SEED_IDS.questions.map((id) => [id, 1]));
-  const perfect = submitQuizAttempt(db, userId, SEED_IDS.quiz, allCorrect);
+  const perfect = await submitQuizAttempt(db, userId, SEED_IDS.quiz, allCorrect);
   assert.equal(perfect.score, 5);
   assert.equal(perfect.total, 5);
   assert.equal(perfect.percent, 100);
@@ -694,7 +712,7 @@ test("quiz answers stay server-side and scoring is computed on the server", asyn
   }
 
   const allWrong = Object.fromEntries(SEED_IDS.questions.map((id) => [id, 0]));
-  const failed = submitQuizAttempt(db, userId, SEED_IDS.quiz, allWrong);
+  const failed = await submitQuizAttempt(db, userId, SEED_IDS.quiz, allWrong);
   assert.equal(failed.score, 0);
   assert.equal(failed.percent, 0);
   assert.equal(failed.passed, false);
@@ -705,54 +723,54 @@ test("quiz answers stay server-side and scoring is computed on the server", asyn
     assert.ok(result.explanation.length > 10);
   }
 
-  const malformed = submitQuizAttempt(db, userId, SEED_IDS.quiz, { [SEED_IDS.questions[0]]: 99 });
+  const malformed = await submitQuizAttempt(db, userId, SEED_IDS.quiz, { [SEED_IDS.questions[0]]: 99 });
   assert.equal(malformed.score, 0);
   assert.equal(malformed.results[0].chosenIndex, null);
 
-  const attempts = listAttempts(db, userId, SEED_IDS.quiz);
+  const attempts = await listAttempts(db, userId, SEED_IDS.quiz);
   assert.equal(attempts.length, 3);
   assert.equal(attempts.every((attempt) => attempt.total === 5), true);
 });
 
 test("lesson completion is idempotent and progress reports percent and streak", async () => {
   const email = "progress.learner@example.com";
-  assert.equal(signup(email).status, 201);
+  assert.equal((await signup(email)).status, 201);
   const userId = (await login(email)).body.user.id;
 
-  const first = completeLesson(db, userId, SEED_IDS.lessons[0]);
+  const first = await completeLesson(db, userId, SEED_IDS.lessons[0]);
   assert.equal(first.completed, true);
-  const again = completeLesson(db, userId, SEED_IDS.lessons[0]);
+  const again = await completeLesson(db, userId, SEED_IDS.lessons[0]);
   assert.equal(again.completedAt, first.completedAt);
 
-  let progress = getProgress(db, userId, new Date());
+  let progress = await getProgress(db, userId, new Date());
   assert.equal(progress.completedLessons, 1);
   assert.equal(progress.totalLessons, 3);
   assert.equal(progress.percent, 33);
   assert.equal(progress.streakDays, 1);
   assert.ok(progress.lastActivity);
 
-  const course = getCourse(db, SEED_IDS.course, userId);
+  const course = await getCourse(db, SEED_IDS.course, userId);
   assert.equal(course.lessons.length, 3);
   assert.equal(course.lessons[0].completed, true);
   assert.equal(course.percent, 33);
 
-  completeLesson(db, userId, SEED_IDS.lessons[1]);
-  completeLesson(db, userId, SEED_IDS.lessons[2]);
-  progress = getProgress(db, userId, new Date());
+  await completeLesson(db, userId, SEED_IDS.lessons[1]);
+  await completeLesson(db, userId, SEED_IDS.lessons[2]);
+  progress = await getProgress(db, userId, new Date());
   assert.equal(progress.completedLessons, 3);
   assert.equal(progress.percent, 100);
   assert.equal(progress.courses[0].percent, 100);
 
-  const stale = getProgress(db, userId, new Date(Date.now() + 3 * 24 * 60 * 60 * 1000));
+  const stale = await getProgress(db, userId, new Date(Date.now() + 3 * 24 * 60 * 60 * 1000));
   assert.equal(stale.streakDays, 0);
 });
 
 test("academy mutations require a matching CSRF token", async () => {
   const email = "csrf.learner@example.com";
-  assert.equal(signup(email).status, 201);
+  assert.equal((await signup(email)).status, 201);
   const { cookie, csrf } = cookiesFrom(await login(email));
 
-  const missing = handleAcademy({
+  const missing = await handleAcademy({
     method: "POST",
     path: `/lessons/${SEED_IDS.lessons[1]}/complete`,
     headers: { cookie },
@@ -762,7 +780,7 @@ test("academy mutations require a matching CSRF token", async () => {
   assert.equal(missing.status, 403);
   assert.equal(missing.body.code, "CSRF_INVALID");
 
-  const mismatched = handleAcademy({
+  const mismatched = await handleAcademy({
     method: "POST",
     path: `/lessons/${SEED_IDS.lessons[1]}/complete`,
     headers: { cookie, "x-csrf-token": createCsrfToken() },
@@ -771,7 +789,7 @@ test("academy mutations require a matching CSRF token", async () => {
   });
   assert.equal(mismatched.status, 403);
 
-  const good = handleAcademy({
+  const good = await handleAcademy({
     method: "POST",
     path: `/lessons/${SEED_IDS.lessons[1]}/complete`,
     headers: { cookie, "x-csrf-token": csrf },
@@ -781,7 +799,7 @@ test("academy mutations require a matching CSRF token", async () => {
   assert.equal(good.status, 200);
   assert.equal(good.body.completed, true);
 
-  const attempts = handleAcademy({
+  const attempts = await handleAcademy({
     method: "POST",
     path: `/quizzes/${SEED_IDS.quiz}/attempts`,
     headers: { cookie, "x-csrf-token": csrf },
@@ -793,13 +811,13 @@ test("academy mutations require a matching CSRF token", async () => {
   assert.equal(attempts.body.attempt.score, 5);
 });
 
-test("signup persists a student only once and never as an admin", () => {
-  const result = signupUser(
+test("signup persists a student only once and never as an admin", async () => {
+  const result = await signupUser(
     { email: "role.check@example.com", password: "student-password-9" },
     process.env,
   );
   assert.equal(result.ok, true);
   assert.equal(result.user.role, "student");
-  const stored = db.get("SELECT role FROM users WHERE email = ?", ["role.check@example.com"]);
+  const stored = await db.get("SELECT role FROM users WHERE email = ?", ["role.check@example.com"]);
   assert.equal(stored.role, "student");
 });

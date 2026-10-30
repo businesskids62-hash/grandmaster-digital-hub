@@ -147,7 +147,7 @@ export function createApp() {
     return next();
   }
 
-  function sessionGate(req, res, next) {
+  async function sessionGate(req, res, next) {
     if (!authConfigured(process.env)) {
       return res.status(503).json({
         ok: false,
@@ -158,7 +158,7 @@ export function createApp() {
         requestId: req.requestId,
       });
     }
-    const session = resolveSession(req.headers, process.env);
+    const session = await resolveSession(req.headers, process.env);
     if (!session) {
       return res.status(401).json({
         ok: false,
@@ -179,7 +179,7 @@ export function createApp() {
     return next();
   }
 
-  function academyGate(req, res, next) {
+  async function academyGate(req, res, next) {
     if (!authConfigured(process.env)) {
       return res.status(503).json({
         ok: false,
@@ -190,7 +190,7 @@ export function createApp() {
         requestId: req.requestId,
       });
     }
-    const session = resolveSession(req.headers, process.env);
+    const session = await resolveSession(req.headers, process.env);
     if (!session) {
       return res.status(401).json({
         ok: false,
@@ -215,7 +215,7 @@ export function createApp() {
     return sendResult(res, result);
   });
 
-  app.all("/api/auth/session", (req, res) => {
+  app.all("/api/auth/session", async (req, res) => {
     if (req.method !== "GET" && req.method !== "HEAD") {
       res.setHeader("Allow", "GET, HEAD");
       return res.status(405).json({
@@ -225,7 +225,7 @@ export function createApp() {
         requestId: req.requestId,
       });
     }
-    const result = handleSession({
+    const result = await handleSession({
       headers: req.headers,
       env: process.env,
       requestId: req.requestId,
@@ -233,8 +233,8 @@ export function createApp() {
     return sendResult(res, result);
   });
 
-  app.all("/api/auth/signup", (req, res) => {
-    const result = handleSignup({
+  app.all("/api/auth/signup", async (req, res) => {
+    const result = await handleSignup({
       method: req.method,
       headers: req.headers,
       body: req.body,
@@ -245,8 +245,8 @@ export function createApp() {
     return sendResult(res, result);
   });
 
-  app.all("/api/auth/logout", (req, res) => {
-    const result = handleLogout({
+  app.all("/api/auth/logout", async (req, res) => {
+    const result = await handleLogout({
       headers: req.headers,
       env: process.env,
       requestId: req.requestId,
@@ -254,8 +254,8 @@ export function createApp() {
     return sendResult(res, result);
   });
 
-  app.all("/api/auth/forgot-password", (req, res) => {
-    const result = handleForgotPassword({
+  app.all("/api/auth/forgot-password", async (req, res) => {
+    const result = await handleForgotPassword({
       method: req.method,
       headers: req.headers,
       body: req.body,
@@ -266,8 +266,8 @@ export function createApp() {
     return sendResult(res, result);
   });
 
-  app.all("/api/auth/reset-password", (req, res) => {
-    const result = handleResetPassword({
+  app.all("/api/auth/reset-password", async (req, res) => {
+    const result = await handleResetPassword({
       method: req.method,
       headers: req.headers,
       body: req.body,
@@ -278,8 +278,8 @@ export function createApp() {
     return sendResult(res, result);
   });
 
-  app.all("/api/auth/change-password", (req, res) => {
-    const result = handleChangePassword({
+  app.all("/api/auth/change-password", async (req, res) => {
+    const result = await handleChangePassword({
       method: req.method,
       headers: req.headers,
       body: req.body,
@@ -289,8 +289,8 @@ export function createApp() {
     return sendResult(res, result);
   });
 
-  app.all("/api/auth/account", (req, res) => {
-    const result = handleDeleteAccount({
+  app.all("/api/auth/account", async (req, res) => {
+    const result = await handleDeleteAccount({
       method: req.method,
       headers: req.headers,
       body: req.body,
@@ -300,8 +300,8 @@ export function createApp() {
     return sendResult(res, result);
   });
 
-  app.all("/api/admin/stats", sessionGate, (req, res) => {
-    const result = handleAdminStats({
+  app.all("/api/admin/stats", sessionGate, async (req, res) => {
+    const result = await handleAdminStats({
       method: req.method,
       headers: req.headers,
       env: process.env,
@@ -310,8 +310,8 @@ export function createApp() {
     return sendResult(res, result);
   });
 
-  app.use("/api/academy", academyGate, (req, res) => {
-    const result = handleAcademy({
+  app.use("/api/academy", academyGate, async (req, res) => {
+    const result = await handleAcademy({
       method: req.method,
       path: req.path,
       headers: req.headers,
@@ -645,7 +645,7 @@ const isMain =
 if (isMain) {
   try {
     // Apply migrations (including login_events) before the port opens.
-    getDatabase(process.env);
+    await getDatabase(process.env).ready();
     console.log("Account database ready.");
   } catch {
     console.warn(

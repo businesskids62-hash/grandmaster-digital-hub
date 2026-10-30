@@ -15,10 +15,10 @@ export default async function handler(req, res) {
   const { requestId } = prepare(req, res, process.env);
   if (res.writableEnded) return;
 
-  const session = requireSession(req, res, process.env, requestId, { role: "any" });
+  const session = await requireSession(req, res, process.env, requestId, { role: "any" });
   if (!session) return;
 
-  const result = handleAcademy({
+  const result = await handleAcademy({
     method: req.method,
     path: pathFrom(req),
     headers: req.headers || {},

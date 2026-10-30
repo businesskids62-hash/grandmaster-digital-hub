@@ -14,7 +14,7 @@ export default async function handler(req, res) {
   const { clientKey, requestId } = prepare(req, res, process.env);
   if (res.writableEnded) return;
 
-  const result = handleResetPassword({
+  const result = await handleResetPassword({
     method: req.method,
     headers: req.headers || {},
     body: parsedBody(req.body),

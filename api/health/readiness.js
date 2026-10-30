@@ -18,7 +18,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed. Use GET.", requestId });
   }
 
-  if (!requireSession(req, res, process.env, requestId)) return;
+  if (!(await requireSession(req, res, process.env, requestId))) return;
 
   const rate = checkHealthRateLimit(clientKey, process.env);
   const rateHeaders = healthRateLimitHeaders(rate);

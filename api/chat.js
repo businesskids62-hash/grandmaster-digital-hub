@@ -46,7 +46,7 @@ export default async function handler(req, res) {
       .json({ error: "Request body is too large.", requestId });
   }
 
-  if (!requireSession(req, res, process.env, requestId)) return;
+  if (!(await requireSession(req, res, process.env, requestId))) return;
 
   if (rateLimited(clientKey)) {
     res.setHeader("Retry-After", "60");
