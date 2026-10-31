@@ -42,8 +42,13 @@ const {
   createMt5HealthReport,
   createStorageHealthReport,
 } = await import("../lib/subsystemHealth.js");
-const aiHealthHandler = (await import("../api/health/ai.js")).default;
-const storageHealthHandler = (await import("../api/health/storage.js")).default;
+// /api/health/* is one consolidated Vercel function; these aliases keep the
+// per-subsystem routes addressed by their real URL.
+const healthRoute = (await import("../api/health/[...path].js")).default;
+const aiHealthHandler = (req, res) =>
+  healthRoute({ ...req, url: "/api/health/ai" }, res);
+const storageHealthHandler = (req, res) =>
+  healthRoute({ ...req, url: "/api/health/storage" }, res);
 const chatHandler = (await import("../api/chat.js")).default;
 const { createSessionToken, SESSION_COOKIE_NAME } = await import(
   "../lib/auth/session.js"

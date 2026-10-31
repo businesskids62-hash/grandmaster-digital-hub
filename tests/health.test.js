@@ -29,7 +29,11 @@ const { resetVerificationSnapshot, verifyProvider } = await import(
   "../lib/aiProviders.js"
 );
 const healthHandler = (await import("../api/health.js")).default;
-const readinessHandler = (await import("../api/health/readiness.js")).default;
+// /api/health/* is one consolidated Vercel function; the route still answers at
+// /api/health/readiness, so the alias keeps the assertions path-accurate.
+const healthRoute = (await import("../api/health/[...path].js")).default;
+const readinessHandler = (req, res) =>
+  healthRoute({ ...req, url: "/api/health/readiness" }, res);
 const { createSessionToken, SESSION_COOKIE_NAME } = await import(
   "../lib/auth/session.js"
 );
