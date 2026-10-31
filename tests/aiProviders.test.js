@@ -3,8 +3,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   answerChat,
+  buildProviderVerificationStatus,
   executeProviderRotation,
   getProviderStatusList,
+  getVerificationSnapshot,
   isVerificationCurrent,
   parseProviders,
   providerHealthLabel,
@@ -13,6 +15,9 @@ import {
   refreshProviderVerification,
   resetResponseCache,
   resetVerificationSnapshot,
+  rotationMode,
+  SINGLE_ROTATION_WARNING,
+  verificationHttpStatus,
   verifyProvider,
   verifyProviderCached,
   VERIFICATION_TTL_MS,
@@ -714,5 +719,232 @@ test("8. verified primary evidence does not mark a secondary provider GREEN", as
   } finally {
     resetBreakerState();
     resetVerificationSnapshot();
+  }
+});
+
+test("18. AI_MODEL alone keeps rotation single unless an alternate is configured", () => {
+  assert.deepEqual(parseProviders({ AI_MODEL: "solo-model", GEMINI_API_KEY: "k" }), [
+    "gemini:solo-model",
+  ]);
+  assert.equal(
+    rotationMode({ AI_MODEL: "solo-model" }).warning,
+    SINGLE_ROTATION_WARNING,
+  );
+  assert.deepEqual(
+    parseProviders({
+      AI_MODEL: "solo-model",
+      AI_PROVIDERS: "gemini:alternate-model",
+      GEMINI_API_KEY: "k",
+    }),
+    ["gemini:solo-model", "gemini:alternate-model"],
+  );
+  assert.deepEqual(
+    parseProviders({
+      AI_MODEL: "solo-model",
+      GEMINI_FALLBACK_MODEL: "legacy-fallback",
+      GEMINI_API_KEY: "k",
+    }),
+    ["gemini:solo-model", "gemini:legacy-fallback"],
+  );
+  // The legacy single-name variable must not become a duplicate of the primary.
+  assert.deepEqual(
+    parseProviders({
+      AI_MODEL: "gemini-3.5-flash-lite",
+      AI_PROVIDER: "gemini",
+      GEMINI_API_KEY: "k",
+    }),
+    ["gemini:gemini-3.5-flash-lite"],
+  );
+  assert.equal(rotationMode({ AI_PROVIDERS: "gemini:a,gemini:b" }).mode, "multi");
+});
+
+test("19. an all-cooling rotation reports the recorded cause, not generic text", async () => {
+  resetBreakerState();
+  resetVerificationSnapshot();
+  const env = { AI_PROVIDERS: "gemini:cooling-model", GEMINI_API_KEY: "mock-secret-key-12345" };
+  const unavailableFetch = async () => ({
+    ok: false,
+    status: 503,
+    headers: new Map([["retry-after", "120"]]),
+    json: async () => ({ error: { message: "Model is experiencing high demand" } }),
+  });
+
+  await assert.rejects(() =>
+    executeProviderRotation({
+      message: "prime the breaker",
+      env,
+      fetchImpl: unavailableFetch,
+      maxRetries: 0,
+      modelListTimeoutMs: 0,
+    }),
+  );
+
+  const verification = await verifyProvider(env, {
+    fetchImpl: unavailableFetch,
+    timeoutMs: 1_000,
+    modelListTimeoutMs: 0,
+  });
+  assert.equal(verification.status, "failed");
+  assert.equal(
+    verification.reason,
+    "The provider is temporarily unavailable (high demand or outage).",
+  );
+  resetBreakerState();
+  resetVerificationSnapshot();
+});
+
+test("20. a later 503 is not reported as quota when a 429 also happened", async () => {
+  resetBreakerState();
+  const env = {
+    AI_PROVIDERS: "gemini:quota-first,gemini:unavailable-second",
+    GEMINI_API_KEY: "mock-secret-key-12345",
+  };
+  const fetchImpl = async (url) =>
+    String(url).includes("quota-first")
+      ? {
+          ok: false,
+          status: 429,
+          headers: new Map([["retry-after", "30"]]),
+          json: async () => ({ error: { message: "Too Many Requests" } }),
+        }
+      : {
+          ok: false,
+          status: 503,
+          headers: new Map(),
+          json: async () => ({ error: { message: "high demand" } }),
+        };
+
+  await assert.rejects(
+    () =>
+      executeProviderRotation({
+        message: "mixed causes",
+        env,
+        fetchImpl,
+        maxRetries: 0,
+      }),
+    (error) => {
+      assert.equal(error.code, "ALL_PROVIDERS_FAILED");
+      assert.equal(error.status, 503);
+      assert.equal(error.quotaObserved, true);
+      assert.equal(error.attempts.length, 2);
+      return true;
+    },
+  );
+  resetBreakerState();
+});
+
+test("21. verification on the fallback model is DEGRADED, never primary GREEN", async () => {
+  resetBreakerState();
+  resetVerificationSnapshot();
+  const env = {
+    AI_PROVIDERS: "gemini:broken-primary,gemini:working-secondary",
+    GEMINI_API_KEY: "mock-secret-key-12345",
+  };
+  const fetchImpl = async (url) => {
+    if (String(url).includes("/models?pageSize")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Map(),
+        json: async () => ({
+          models: [
+            { name: "models/broken-primary" },
+            { name: "models/working-secondary" },
+          ],
+        }),
+      };
+    }
+    if (String(url).includes("broken-primary")) {
+      return {
+        ok: false,
+        status: 503,
+        headers: new Map(),
+        json: async () => ({ error: { message: "high demand" } }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: "OK" }] } }],
+      }),
+    };
+  };
+
+  try {
+    const verification = await verifyProvider(env, { fetchImpl, timeoutMs: 1_000 });
+    assert.equal(verification.status, "verified");
+    assert.equal(verification.model, "working-secondary");
+
+    const status = buildProviderVerificationStatus(env, {
+      snapshot: getVerificationSnapshot(),
+    });
+    assert.equal(status.status, "verified_fallback");
+    assert.equal(status.health, "DEGRADED");
+    assert.equal(status.verified, false);
+    assert.equal(status.verifiedOnFallback, true);
+    assert.equal(status.verifiedModel, "working-secondary");
+    assert.equal(status.configuredPrimaryModel, "broken-primary");
+    assert.equal(verificationHttpStatus(status.status), 200);
+
+    // The provider list and the status endpoint now agree about the primary.
+    const primary = getProviderStatusList(env)[0];
+    assert.equal(providerHealthLabel(primary), "CAPABILITY NOT VERIFIED");
+  } finally {
+    resetBreakerState();
+    resetVerificationSnapshot();
+  }
+});
+
+test("22. broken AI states never travel as HTTP 200", () => {
+  resetVerificationSnapshot();
+  const env = { AI_PROVIDERS: "gemini:http-model", GEMINI_API_KEY: "mock-secret-key-12345" };
+  assert.equal(verificationHttpStatus("verified"), 200);
+  assert.equal(verificationHttpStatus("verified_fallback"), 200);
+  assert.equal(verificationHttpStatus("verifying"), 200);
+  assert.equal(verificationHttpStatus("unverified"), 200);
+  assert.equal(verificationHttpStatus("stale"), 200);
+  assert.equal(verificationHttpStatus("failed"), 503);
+  assert.equal(verificationHttpStatus("not_configured"), 503);
+  assert.equal(verificationHttpStatus("mismatch"), 503);
+  assert.equal(verificationHttpStatus("quota_exceeded"), 429);
+
+  const unconfigured = buildProviderVerificationStatus({ AI_PROVIDERS: "gemini:http-model" });
+  assert.equal(unconfigured.status, "not_configured");
+  assert.equal(verificationHttpStatus(unconfigured.status), 503);
+});
+
+test("24. an unimplemented provider type is skipped and rotation continues", async () => {
+  resetBreakerState();
+  const env = {
+    AI_PROVIDERS: "openai:some-model,gemini:reachable-model",
+    GEMINI_API_KEY: "mock-secret-key-12345",
+  };
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return {
+      ok: true,
+      status: 200,
+      headers: new Map(),
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: "After the skip" }] } }],
+      }),
+    };
+  };
+
+  try {
+    const result = await executeProviderRotation({
+      message: "skip unsupported",
+      env,
+      fetchImpl,
+    });
+    assert.equal(result.reply, "After the skip");
+    assert.equal(calls, 1, "the unsupported provider must not be called");
+    assert.equal(result.attempts[0].errorCategory, "provider_not_supported");
+    assert.equal(result.fallbackUsed, true);
+  } finally {
+    resetBreakerState();
   }
 });

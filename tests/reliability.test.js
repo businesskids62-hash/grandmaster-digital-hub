@@ -119,6 +119,15 @@ function fakeRes() {
     res.writableEnded = true;
     return res;
   };
+  const listeners = new Map();
+  res.on = (name, fn) => {
+    if (!listeners.has(name)) listeners.set(name, new Set());
+    listeners.get(name).add(fn);
+  };
+  res.removeListener = (name, fn) => listeners.get(name)?.delete(fn);
+  res.emitClose = () => {
+    for (const fn of [...(listeners.get("close") || [])]) fn();
+  };
   return res;
 }
 

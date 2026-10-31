@@ -440,3 +440,60 @@ test("a failed AI chat is recorded once with a code and root cause", async () =>
   assert.ok(failures[0].rootCause.length > 0);
   assert.equal(JSON.stringify(failures[0]).includes(API_KEY), false);
 });
+
+test("chat adapter survives a response object without EventEmitter methods", async () => {
+  resetLogStore();
+  const res = fakeRes();
+  assert.equal(typeof res.on, "undefined", "fixture must stay lightweight");
+  assert.equal(typeof res.removeListener, "undefined");
+
+  await chatHandler(
+    {
+      method: "POST",
+      url: "/api/chat",
+      headers: {
+        "x-forwarded-for": "198.51.100.140",
+        cookie: sessionCookie(),
+      },
+      body: { message: "hello" },
+      socket: {},
+    },
+    res,
+  );
+
+  assert.equal(res.statusCode, 503);
+  assert.ok(res.body?.code);
+  assert.equal(
+    getActiveErrors(5).filter((entry) => entry.event === "ai_chat_failed").length,
+    1,
+  );
+});
+
+test("chat adapter registers and removes the disconnect listener when supported", async () => {
+  resetLogStore();
+  const registered = [];
+  const removed = [];
+  const res = fakeRes();
+  res.on = (event, listener) => registered.push([event, listener]);
+  res.removeListener = (event, listener) => removed.push([event, listener]);
+
+  await chatHandler(
+    {
+      method: "POST",
+      url: "/api/chat",
+      headers: {
+        "x-forwarded-for": "198.51.100.141",
+        cookie: sessionCookie(),
+      },
+      body: { message: "hello" },
+      socket: {},
+    },
+    res,
+  );
+
+  assert.equal(res.statusCode, 503);
+  assert.equal(registered.length, 1);
+  assert.equal(registered[0][0], "close");
+  assert.equal(typeof registered[0][1], "function");
+  assert.deepEqual(removed, registered, "cleanup must detach the same listener");
+});

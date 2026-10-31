@@ -57,6 +57,15 @@ export default async function handler(req, res) {
   }
 
   const started = Date.now();
+  // Parity with the Express route: a disconnected client stops the provider
+  // call instead of burning quota and a concurrency slot on a dead response.
+  // The listener is optional: a response without EventEmitter methods still
+  // gets the abort signal, it just cannot report an early disconnect.
+  const controller = new AbortController();
+  const onClientClose = () => {
+    if (!res.writableEnded) controller.abort();
+  };
+  res.on?.("close", onClientClose);
   try {
     if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
       return res
@@ -86,6 +95,7 @@ export default async function handler(req, res) {
       message: message.trim(),
       history: sanitizeChatHistory(history),
       env: process.env,
+      signal: controller.signal,
     });
 
     logEvent({
@@ -146,5 +156,7 @@ export default async function handler(req, res) {
       },
       headers,
     );
+  } finally {
+    res.removeListener?.("close", onClientClose);
   }
 }

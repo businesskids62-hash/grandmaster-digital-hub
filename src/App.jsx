@@ -294,6 +294,10 @@ function aiStatusPresentation(status) {
       return { key: "UNKNOWN", label: "NOT CHECKED", type: "" };
     case "verified":
       return { key: "VERIFIED", label: "AI READY", type: "green" };
+    case "verified_fallback":
+      return { key: "DEGRADED", label: "AI READY (FALLBACK)", type: "gold" };
+    case "mismatch":
+      return { key: "FAILED", label: "MODEL MISMATCH", type: "red" };
     case "verifying":
       return { key: "VERIFYING", label: "VERIFYING", type: "" };
     case "stale":
@@ -483,6 +487,7 @@ async function apiRequest(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
       );
       error.status = response.status;
       error.code = body?.code || "";
+      error.body = body || null;
       error.requestId = body?.requestId || response.headers.get("x-request-id") || "";
       throw error;
     }
@@ -1427,17 +1432,30 @@ function App() {
         setAiReason("GEMINI_API_KEY server par set nahi hai (.env check karein).");
       } else {
         try {
-          const ai = await apiRequest(
-            `/api/ai/status${isForce ? "?force=1" : ""}`,
-            { method: "GET" },
-            35000,
-          );
+          let ai;
+          try {
+            ai = await apiRequest(
+              `/api/ai/status${isForce ? "?force=1" : ""}`,
+              { method: "GET" },
+              35000,
+            );
+          } catch (statusError) {
+            // A failed check now answers 503/429 with the same payload, so the
+            // honest state is rendered instead of collapsing into a transport error.
+            if (!statusError.body?.status) throw statusError;
+            ai = statusError.body;
+          }
           if (!mounted.current) return;
           const presentation = aiStatusPresentation(ai?.status);
           setAiDetail(ai);
           setAiStatus(presentation.key);
           setAiReason(
-            ai?.status === "verified" ? "" : ai?.reason || "AI check failed.",
+            [
+              ai?.status === "verified" ? "" : ai?.reason || "AI check failed.",
+              ai?.rotationMode === "single" ? ai?.rotationWarning : "",
+            ]
+              .filter(Boolean)
+              .join(" "),
           );
           if (aiLoggedState.current !== presentation.key) {
             aiLoggedState.current = presentation.key;

@@ -15,6 +15,8 @@ import {
   providerHealthLabel,
   refreshProviderVerification,
   sanitizeChatHistory,
+  verificationErrorCode,
+  verificationHttpStatus,
   verifyProviderCached,
 } from "../lib/aiProviders.js";
 import { getAllowedOrigins } from "../lib/cors.js";
@@ -359,14 +361,17 @@ export function createApp() {
   });
 
   // Per-subsystem health (private). Each report has its own timestamp, latency
-  // and stale flag; HTTP 200 never implies the subsystem itself works.
+  // and stale flag. AI answers with the honest verification code, the same way
+  // the Vercel adapter does.
   app.all("/api/health/ai", sessionGate, healthRateGate, (req, res) => {
     if (req.method !== "GET" && req.method !== "HEAD") {
       res.setHeader("Allow", "GET, HEAD");
       return res.status(405).json({ error: "Method not allowed. Use GET." });
     }
     const report = createAiHealthReport({ env: process.env });
-    return res.status(200).json({ ...report, requestId: req.requestId });
+    return res
+      .status(verificationHttpStatus(report.verificationStatus))
+      .json({ ...report, requestId: req.requestId });
   });
 
   app.all("/api/health/mt5", sessionGate, healthRateGate, async (req, res, next) => {
@@ -454,7 +459,15 @@ export function createApp() {
           message: "Provider verification refreshed on request.",
         });
       }
-      return res.json({ ...payload, requestId: req.requestId });
+      return res
+        .status(verificationHttpStatus(payload.status))
+        .json({
+          ...payload,
+          ...(verificationErrorCode(payload.status)
+            ? { code: verificationErrorCode(payload.status) }
+            : {}),
+          requestId: req.requestId,
+        });
     } catch (error) {
       return next(error);
     }

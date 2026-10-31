@@ -1,4 +1,8 @@
-import { refreshProviderVerification } from "../../lib/aiProviders.js";
+import {
+  refreshProviderVerification,
+  verificationErrorCode,
+  verificationHttpStatus,
+} from "../../lib/aiProviders.js";
 import { prepare, queryObject, requireSession, sendJson } from "../../lib/vercelHttp.js";
 
 // "verified" is only returned after a real provider call succeeds.
@@ -17,5 +21,15 @@ export default async function handler(req, res) {
   const query = queryObject(req);
   const force = query.force === "1" || query.force === "true" || query.force === "yes";
   const payload = await refreshProviderVerification(process.env, { force });
-  return sendJson(res, 200, { ...payload, requestId });
+  const statusCode = verificationHttpStatus(payload.status);
+  const code = verificationErrorCode(payload.status);
+  return sendJson(res, statusCode, {
+    ...payload,
+    ...(code ? { code } : {}),
+    ...(statusCode === 429 && payload.retryAfter
+      ? { retryAfter: payload.retryAfter, retryable: true }
+      : {}),
+    error: statusCode === 200 ? undefined : payload.reason || "AI verification failed.",
+    requestId,
+  });
 }

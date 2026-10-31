@@ -1,16 +1,15 @@
 {
-  "name": "Grandmaster Digital Hub Academy",
+  "name": "Grandmaster Digital Hub",
   "short_name": "Grandmaster",
-  "description": "Education-only trading academy. Not financial advice.",
-  "id": "/academy",
-  "start_url": "/academy",
+  "description": "Private AI operations dashboard and the home of Grandmaster Academy.",
+  "id": "/",
+  "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait",
   "background_color": "#0b1220",
   "theme_color": "#0b1220",
   "lang": "en",
-  "categories": ["education"],
+  "categories": ["productivity", "education"],
   "icons": [
     {
       "src": "/icons/icon-192.png",

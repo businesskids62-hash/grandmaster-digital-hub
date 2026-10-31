@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { execSync } from "node:child_process";
 
 const DEFAULT_API_TARGET = "http://127.0.0.1:8000";
-const DEV_PORT = 5174;
+const DEV_PORT = 5173;
 
 function getCommitSha() {
   if (process.env.VERCEL_GIT_COMMIT_SHA) {
@@ -33,7 +33,7 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: DEV_PORT,
-      strictPort: true,
+      strictPort: false,
       proxy: {
         "/api": {
           target: apiTarget,

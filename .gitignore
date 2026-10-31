@@ -19,7 +19,8 @@ dist-ssr
 !.env.example
 
 # Phase 3 local state (tasks, memories, audit events)
-data
+/data
+/server/data
 .tmp-test-data
 
 # Python bridge cache

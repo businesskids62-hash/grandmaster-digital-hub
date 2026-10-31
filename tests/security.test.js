@@ -86,6 +86,15 @@ function fakeRes() {
     res.writableEnded = true;
     return res;
   };
+  const listeners = new Map();
+  res.on = (name, fn) => {
+    if (!listeners.has(name)) listeners.set(name, new Set());
+    listeners.get(name).add(fn);
+  };
+  res.removeListener = (name, fn) => listeners.get(name)?.delete(fn);
+  res.emitClose = () => {
+    for (const fn of [...(listeners.get("close") || [])]) fn();
+  };
   return res;
 }
 
@@ -637,4 +646,98 @@ test("provider health labels use only honest states", () => {
     }),
     "GREEN",
   );
+});
+
+// Matrix case 14. The v1 parser splits on "/" first and only then
+// decodeURIComponent()es each segment (lib/api/v1.js:683-693), so an encoded
+// separator can never create a segment, and .slice(0, 6) caps the depth. These
+// tests pin that real behavior: a hostile segment is treated as an opaque
+// record id and answers exactly like an unknown id would. Nothing here changes
+// the policy — it proves the policy already in the code.
+test("v1 path segments treat traversal and encoding tricks as unknown ids", async () => {
+  resetRateLimits();
+  const baseline = await call("GET", `/tasks/${UNKNOWN_ID}`, {
+    headers: authorized,
+  });
+  assert.equal(baseline.status, 404, "unknown id must be a 404 baseline");
+  assert.equal(baseline.body.ok, false);
+
+  const traversalPaths = [
+    "/tasks/..",
+    "/tasks/../",
+    "/tasks/%2e%2e",
+    "/tasks/%2E%2E",
+    "/tasks/....",
+    "/tasks/%252e%252e",
+    "/tasks/..%2fapprove",
+    "/tasks/a%2fb",
+  ];
+
+  for (const route of traversalPaths) {
+    const response = await call("GET", route, { headers: authorized });
+    assert.equal(
+      response.status,
+      baseline.status,
+      `${route} must not answer differently from an unknown id`,
+    );
+    assert.equal(
+      response.body.error.code,
+      baseline.body.error.code,
+      `${route} leaked a different error code`,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(response.body),
+      /(?:[A-Za-z]:\\|\/tmp\/|\/var\/|grandmaster-data|academy\.db)/,
+      `${route} leaked a filesystem path`,
+    );
+  }
+
+  // Deeper traversal shapes do not resolve to a record at all; they are simply
+  // not routes. Both answers are rejections, but the codes differ honestly.
+  const notFound = await call("GET", "/tasks/%2e%2e/%2e%2e/approve", {
+    headers: authorized,
+  });
+  assert.equal(notFound.status, 404);
+  assert.equal(notFound.body.error.code, "ENDPOINT_NOT_FOUND");
+
+  const approved = await call("POST", "/tasks/../approve", {
+    body: {},
+    headers: authorized,
+  });
+  const approvedBaseline = await call("POST", `/tasks/${UNKNOWN_ID}/approve`, {
+    body: {},
+    headers: authorized,
+  });
+  assert.equal(approved.status, approvedBaseline.status);
+  assert.equal(approved.body.error.code, approvedBaseline.body.error.code);
+
+  // A valid path still resolves, so the assertions above are not blanket 404s.
+  const status = await call("GET", "/status");
+  assert.equal(status.status, 200);
+  const agents = await call("GET", "/agents");
+  assert.equal(agents.status, 200);
+});
+
+test("v1 rejects path segment chains longer than the supported depth", async () => {
+  resetRateLimits();
+  const deep = await call("GET", "/status/extra/deep/segments/here/now/again");
+  assert.equal(deep.status, 404);
+  assert.equal(deep.body.error.code, "ENDPOINT_NOT_FOUND");
+
+  const deepTraversal = await call("GET", "/tasks/../../x/y/z/w/v/u");
+  assert.equal(deepTraversal.status, 404);
+  assert.equal(deepTraversal.body.error.code, "ENDPOINT_NOT_FOUND");
+  assert.doesNotMatch(JSON.stringify(deepTraversal.body), /academy\.db|\/tmp\//);
+
+  const deepWrite = await call("POST", "/tasks/id/approve/a/b/c/d/e/f", {
+    body: {},
+    headers: authorized,
+  });
+  assert.equal(deepWrite.status, 404);
+  assert.equal(deepWrite.body.error.code, "ENDPOINT_NOT_FOUND");
+
+  // The same route at a supported depth still works, proving the cap is a
+  // segment-count rule and not a rejection of the resource itself.
+  const shallow = await call("GET", "/status");
+  assert.equal(shallow.status, 200);
 });

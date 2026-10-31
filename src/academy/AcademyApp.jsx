@@ -228,7 +228,7 @@ export default function AcademyApp() {
   useEffect(() => {
     if (!import.meta.env.PROD) return undefined;
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return undefined;
-    navigator.serviceWorker.register("/sw.js").catch(() => {
+    navigator.serviceWorker.register("/sw.js", { scope: "/academy" }).catch(() => {
       /* offline support is optional */
     });
     return undefined;
