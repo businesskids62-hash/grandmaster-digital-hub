@@ -240,6 +240,37 @@ test("session-guarded endpoints answer once a valid session exists", async () =>
     `ai health must report an honest status string, got ${JSON.stringify(aiReport.body)}`);
 });
 
+test("Vercel SPA fallback never shadows /api/ GET requests", () => {
+  const config = JSON.parse(fs.readFileSync(path.join(repoRoot, "vercel.json"), "utf-8"));
+  const fallbacks = (config.rewrites || []).filter((rule) => rule.destination === "/index.html");
+  assert.equal(fallbacks.length, 1, "exactly one SPA fallback rewrite");
+
+  // Vercel source patterns of this shape translate 1:1 to a JS regex anchored at
+  // both ends, so the negative lookahead can be checked against real paths.
+  const matcher = new RegExp(`^${fallbacks[0].source}$`);
+  for (const publicPath of ["/", "/academy", "/login", "/signup", "/tasks/123"]) {
+    assert.ok(matcher.test(publicPath), `${publicPath} must fall back to the SPA shell`);
+  }
+  // A swallowed GET answers index.html while the method still reaches the
+  // function, which is why POST-only checks never caught this in production.
+  for (const apiPath of [
+    "/api/health",
+    "/api/health/readiness",
+    "/api/health/ai",
+    "/api/auth/session",
+    "/api/auth/login",
+    "/api/ai/providers",
+    "/api/v1/status",
+    "/api/academy/lessons",
+  ]) {
+    assert.equal(matcher.test(apiPath), false, `${apiPath} must reach its serverless function`);
+  }
+
+  const headerSources = (config.headers || []).map((rule) => rule.source);
+  assert.ok(headerSources.includes("/api/(.*)"), "API CSP rule must still target /api/(.*)");
+  assert.ok(headerSources.includes("/(.*)"), "page header rules must still target /(.*)");
+});
+
 test("missing session authority fails closed through the consolidated routes", async () => {
   const previous = process.env.GRANDMASTER_SESSION_SECRET;
   const headers = sessionHeaders();

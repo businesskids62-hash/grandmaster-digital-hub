@@ -370,11 +370,20 @@ const vercelJsonPath = path.resolve('vercel.json');
 assert(fs.existsSync(vercelJsonPath), 'Vercel Config: vercel.json exists');
 try {
   const vConfig = JSON.parse(fs.readFileSync(vercelJsonPath, 'utf-8'));
-  assert(Array.isArray(vConfig.rewrites) && vConfig.rewrites.length >= 2, 'Vercel Config: Contains rewrites array');
-  const apiRewrite = vConfig.rewrites.find(r => r.source === '/api/(.*)');
-  const spaRewrite = vConfig.rewrites.find(r => r.source === '/(.*)');
-  assert(apiRewrite && apiRewrite.destination === '/api/$1', 'Vercel Config: Preserves /api/(.*) routes');
-  assert(spaRewrite && spaRewrite.destination === '/index.html', 'Vercel Config: Rewrites all SPA routes to /index.html');
+  assert(Array.isArray(vConfig.rewrites) && vConfig.rewrites.length >= 1, 'Vercel Config: Contains rewrites array');
+  // Vercel applies rewrites to GET/HEAD only, and a broad "/(.*)" fallback also
+  // shadows /api/* dynamic (catch-all) functions: on the live deployment
+  // GET /api/health/readiness answered index.html while POST reached the
+  // function. The SPA fallback must therefore exclude /api/ so every API path
+  // resolves to its serverless function.
+  const spaRewrite = vConfig.rewrites.find(r => r.destination === '/index.html');
+  assert(spaRewrite, 'Vercel Config: SPA fallback rewrite targets /index.html');
+  assert(spaRewrite.source.includes('(?!api/'), `Vercel Config: SPA fallback excludes /api/ (source: ${spaRewrite.source})`);
+  const apiToSpa = vConfig.rewrites.filter(r => r.source.startsWith('/api') && r.destination === '/index.html');
+  assert(apiToSpa.length === 0, 'Vercel Config: No /api rewrite may answer the SPA shell');
+  const headerSources = (vConfig.headers || []).map(h => h.source);
+  assert(headerSources.includes('/api/(.*)'), 'Vercel Config: API security headers still target /api/(.*)');
+  assert(headerSources.includes('/(.*)'), 'Vercel Config: Page security headers still target /(.*)');
 } catch (e) {
   assert(false, `Vercel Config: Failed to parse vercel.json: ${e.message}`);
 }
