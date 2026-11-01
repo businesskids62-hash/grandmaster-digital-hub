@@ -1130,9 +1130,11 @@ function App() {
         const response = await fetch(`${API_BASE}/api/auth/session`, {
           cache: "no-store",
         });
+        // Read the body before branching: an unconsumed 401 response keeps its
+        // stream open, which stalls network idle on every anonymous page load.
+        const body = await response.json().catch(() => null);
         if (cancelled) return;
         if (response.ok) {
-          const body = await response.json().catch(() => null);
           if (body?.user?.role === "student") {
             window.location.replace("/academy");
             return;
@@ -1141,7 +1143,6 @@ function App() {
           return;
         }
         if (response.status === 503) {
-          const body = await response.json().catch(() => null);
           setAuthError(
             body?.error ||
               "UI authentication is not configured on the server (GRANDMASTER_SESSION_SECRET, ADMIN_EMAIL / ADMIN_PASSWORD).",
