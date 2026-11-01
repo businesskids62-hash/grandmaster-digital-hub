@@ -26,6 +26,7 @@ process.env.CORS_ALLOWED_ORIGINS = "https://grandmaster-digital-hub.vercel.app";
 process.env.AI_PROVIDERS = "gemini:test-model";
 process.env.GEMINI_API_KEY = "";
 process.env.AI_API_KEY = "";
+process.env.GRANDMASTER_RATE_LIMIT_PER_MINUTE = "1000";
 
 const {
   endpointSegment,
@@ -33,16 +34,23 @@ const {
   handleAuthEndpoint,
   handleHealthEndpoint,
 } = await import("../lib/vercel/endpoints.js");
+const { REST_PATH_QUERY_KEY, subPathFrom } = await import("../lib/vercelHttp.js");
+const { closeDatabase } = await import("../lib/db/index.js");
 const { SESSION_COOKIE_NAME, createSessionToken } = await import("../lib/auth/session.js");
-const { resetAuthRateLimits } = await import("../lib/auth/routes.js");
+const { handleSignup, resetAuthRateLimits } = await import("../lib/auth/routes.js");
 const { resetHealthRateLimits } = await import("../lib/healthStatus.js");
 const { resetVerificationSnapshot } = await import("../lib/aiProviders.js");
 
 const authCatchAll = (await import("../api/auth/[...path].js")).default;
 const healthCatchAll = (await import("../api/health/[...path].js")).default;
 const aiCatchAll = (await import("../api/ai/[...path].js")).default;
+const academyCatchAll = (await import("../api/academy/[...path].js")).default;
+const v1CatchAll = (await import("../api/v1/[...path].js")).default;
 
-after(() => {
+after(async () => {
+  // The deep-path tests open the SQLite store; Windows keeps the directory
+  // locked until the handle is released.
+  await closeDatabase();
   resetAuthRateLimits();
   resetHealthRateLimits();
   resetVerificationSnapshot();
@@ -285,4 +293,167 @@ test("missing session authority fails closed through the consolidated routes", a
   } finally {
     process.env.GRANDMASTER_SESSION_SECRET = previous;
   }
+});
+
+// Vercel maps an api/**/[...path].js file to exactly one URL segment, so a deeper
+// call such as /api/v1/mt5/status used to die on the platform 404 before any
+// handler ran. vercel.json `routes` now forward the remainder as a query
+// parameter; these tests lock the config, the rewrite shape and the adapters.
+function rewrittenUrl(rule, url) {
+  const match = new RegExp(rule.src).exec(url);
+  if (!match) return null;
+  return rule.dest.replace(/\$(\w+)/g, (_all, name) => match.groups[name] ?? "");
+}
+
+function routeRulesFor(url) {
+  const config = JSON.parse(fs.readFileSync(path.join(repoRoot, "vercel.json"), "utf-8"));
+  return (config.routes || []).filter((rule) => new RegExp(rule.src).test(url));
+}
+
+test("vercel.json routes deliver multi-segment /api paths to their catch-all function", () => {
+  const deepPaths = [
+    "/api/v1/mt5/status",
+    "/api/v1/mt5/snapshot",
+    "/api/v1/security/posture",
+    "/api/academy/courses/grandmaster-basics",
+    "/api/academy/lessons/lesson-1/complete",
+    "/api/academy/quizzes/quiz-1/attempts",
+  ];
+  // The zero-config function routes Vercel generates for the catch-alls.
+  const servedByCatchAll = new Map([
+    ["/api/v1", /^\/api\/v1\/([^/]+)$/],
+    ["/api/academy", /^\/api\/academy\/([^/]+)$/],
+  ]);
+
+  for (const url of deepPaths) {
+    const rules = routeRulesFor(url);
+    assert.equal(rules.length, 1, `${url} must match exactly one routing rule`);
+    const rewritten = rewrittenUrl(rules[0], url);
+    assert.ok(rewritten, `${url} must be rewritten`);
+    const dest = new URL(rewritten, "http://localhost");
+    const prefix = url.startsWith("/api/v1") ? "/api/v1" : "/api/academy";
+    assert.ok(
+      servedByCatchAll.get(prefix).test(dest.pathname),
+      `${url} → ${rewritten} must land on the ${prefix} catch-all`,
+    );
+    const rest = dest.searchParams.get(REST_PATH_QUERY_KEY);
+    assert.ok(rest, `${url} must carry the remainder as ${REST_PATH_QUERY_KEY}`);
+    assert.equal(
+      `${dest.pathname.split("/").pop()}/${rest}`,
+      url.slice(prefix.length + 1),
+      `${url} must keep every original segment in order`,
+    );
+  }
+
+  // Single-segment endpoints must keep their native route: those calls carry
+  // their own query string and a rewrite would drop it.
+  for (const url of [
+    "/api/v1/status",
+    "/api/v1/tasks?limit=5",
+    "/api/academy/courses",
+    "/api/academy/progress",
+    "/api/auth/login",
+    "/api/health/readiness",
+    "/api/ai/providers",
+  ]) {
+    assert.deepEqual(routeRulesFor(url), [], `${url} must stay on its own route`);
+  }
+
+  // Only the two namespaces with deep endpoints may be rewritten, and nothing
+  // outside /api may be touched by these rules.
+  const config = JSON.parse(fs.readFileSync(path.join(repoRoot, "vercel.json"), "utf-8"));
+  for (const rule of config.routes) {
+    assert.match(rule.src, /^\/api\/(academy|v1)\//, `${rule.src} must stay inside /api`);
+  }
+  for (const publicPath of ["/", "/academy", "/academy/courses"]) {
+    assert.deepEqual(routeRulesFor(publicPath), [], `${publicPath} must reach the SPA fallback`);
+  }
+});
+
+test("subPathFrom reassembles the path from the pathname and the rewritten remainder", () => {
+  const at = (url) => ({ url });
+  assert.equal(subPathFrom(at("/api/academy/courses"), "/api/academy"), "/courses");
+  assert.equal(subPathFrom(at("/api/academy"), "/api/academy"), "/");
+  assert.equal(subPathFrom(at("/"), "/api/academy"), "/");
+  assert.equal(subPathFrom(at("/api/other/courses"), "/api/academy"), "/");
+  // Express and `vercel dev` deliver the whole pathname without any rewrite.
+  assert.equal(
+    subPathFrom(at("/api/academy/lessons/lesson-1/complete"), "/api/academy"),
+    "/lessons/lesson-1/complete",
+  );
+  // The production rewrite: first segment in the pathname, remainder in the query.
+  assert.equal(
+    subPathFrom(at(`/api/academy/lessons?${REST_PATH_QUERY_KEY}=lesson-1/complete`), "/api/academy"),
+    "/lessons/lesson-1/complete",
+  );
+  assert.equal(
+    subPathFrom(at(`/api/v1/mt5?${REST_PATH_QUERY_KEY}=status`), "/api/v1"),
+    "/mt5/status",
+  );
+  // A hand-crafted remainder may not reach a different endpoint or carry extra
+  // structure: traversal, empty hops and oversized remainders resolve to "/".
+  for (const url of [
+    `/api/v1/status?${REST_PATH_QUERY_KEY}=../admin/stats`,
+    `/api/v1/status?${REST_PATH_QUERY_KEY}=..`,
+    `/api/v1/status?${REST_PATH_QUERY_KEY}=%2e%2e/agents`,
+    `/api/v1/status?${REST_PATH_QUERY_KEY}=a/b/c/d/e/f/g/h`,
+  ]) {
+    assert.equal(subPathFrom(at(url), "/api/v1"), "/", `${url} must not resolve`);
+  }
+});
+
+async function learnerCookie(email) {
+  const created = await handleSignup({
+    method: "POST",
+    headers: {},
+    body: { email, password: "vcle-learner-password-1" },
+    env: process.env,
+    clientKey: "vcle-learner-client",
+    requestId: "vcle-learner-request",
+  });
+  assert.equal(created.status, 201, `learner signup must succeed: ${JSON.stringify(created.body)}`);
+  const pairs = (created.headers["Set-Cookie"] || [])
+    .map((entry) => String(entry).split(";")[0])
+    .filter((pair) => pair.startsWith(`${SESSION_COOKIE_NAME}=`));
+  assert.equal(pairs.length, 1, "signup must set exactly one session cookie");
+  return pairs.join("; ");
+}
+
+test("academy catch-all serves deep paths after the Vercel route rewrite", async () => {
+  const cookie = await learnerCookie("vcle-learner@example.com");
+  const headers = { cookie };
+
+  const list = await invoke(academyCatchAll, makeRequest({ url: "/api/academy/courses", headers }));
+  assert.equal(list.statusCode, 200, `courses: ${JSON.stringify(list.body)}`);
+  assert.ok(list.body.courses?.length > 0, "the seeded catalogue must be reachable");
+  const courseId = list.body.courses[0].id;
+
+  const deep = await invoke(
+    academyCatchAll,
+    makeRequest({ url: `/api/academy/courses?${REST_PATH_QUERY_KEY}=${courseId}`, headers }),
+  );
+  assert.equal(deep.statusCode, 200, `course ${courseId}: ${JSON.stringify(deep.body)}`);
+  assert.equal(deep.body.course?.id, courseId);
+
+  const threeSegments = await invoke(
+    academyCatchAll,
+    makeRequest({ url: `/api/academy/lessons?${REST_PATH_QUERY_KEY}=lesson-1/complete`, headers }),
+  );
+  // GET on the POST-only completion branch proves all three segments resolved.
+  assert.equal(threeSegments.statusCode, 405, `complete: ${JSON.stringify(threeSegments.body)}`);
+  assert.equal(threeSegments.headers.allow, "POST");
+});
+
+test("v1 catch-all serves deep paths after the Vercel route rewrite", async () => {
+  const headers = sessionHeaders();
+
+  const flat = await invoke(v1CatchAll, makeRequest({ url: "/api/v1/status", headers }));
+  assert.equal(flat.statusCode, 200, `status: ${JSON.stringify(flat.body)}`);
+
+  const deep = await invoke(
+    v1CatchAll,
+    makeRequest({ url: `/api/v1/security?${REST_PATH_QUERY_KEY}=posture`, headers }),
+  );
+  assert.equal(deep.statusCode, 200, `posture: ${JSON.stringify(deep.body)}`);
+  assert.notEqual(deep.body?.error?.code, "ENDPOINT_NOT_FOUND");
 });

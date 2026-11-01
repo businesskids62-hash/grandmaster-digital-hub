@@ -4,6 +4,7 @@ import {
   requireSession,
   sendJson,
   queryObject,
+  subPathFrom,
   isResponseClosed,
 } from "../../lib/vercelHttp.js";
 
@@ -18,9 +19,7 @@ export default async function handler(req, res) {
 
   if (!(await requireSession(req, res, process.env, requestId))) return;
 
-  const url = new URL(req.url || "/", "http://localhost");
-  const path = url.pathname.replace(/^\/api\/v1/, "") || "/";
-
+  const path = subPathFrom(req, "/api/v1");
   const headers = { ...(req.headers || {}), "x-request-id": requestId };
   const controlToken = String(process.env.GRANDMASTER_CONTROL_TOKEN || "");
   if (controlToken) headers["x-grandmaster-token"] = controlToken;

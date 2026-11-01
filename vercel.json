@@ -1,4 +1,15 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "routes": [
+    {
+      "src": "/api/academy/(?<head>[^/]+)/(?<rest>.+)",
+      "dest": "/api/academy/$head?gm_rest=$rest"
+    },
+    {
+      "src": "/api/v1/(?<head>[^/]+)/(?<rest>.+)",
+      "dest": "/api/v1/$head?gm_rest=$rest"
+    }
+  ],
   "rewrites": [
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
