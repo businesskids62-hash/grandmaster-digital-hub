@@ -20,18 +20,6 @@ export default async function handler(req, res) {
   if (!(await requireSession(req, res, process.env, requestId))) return;
 
   const path = subPathFrom(req, "/api/v1");
-  // TEMPORARY DIAGNOSTIC (removed in the next commit): reveals what the platform
-  // actually hands the function after a vercel.json route rewrite.
-  console.log(
-    JSON.stringify({
-      m009RouteProbe: true,
-      url: req.url,
-      method: req.method,
-      resolvedPath: path,
-      queryKeys: Object.keys(req.query || {}),
-      headerRest: req.headers?.["x-gm-rest"] || null,
-    }),
-  );
   const headers = { ...(req.headers || {}), "x-request-id": requestId };
   const controlToken = String(process.env.GRANDMASTER_CONTROL_TOKEN || "");
   if (controlToken) headers["x-grandmaster-token"] = controlToken;

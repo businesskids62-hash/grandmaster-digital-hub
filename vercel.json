@@ -24,12 +24,6 @@
           "op": "set",
           "target": { "key": "gm_rest" },
           "args": "$rest"
-        },
-        {
-          "type": "request.headers",
-          "op": "set",
-          "target": { "key": "x-gm-rest" },
-          "args": "$rest"
         }
       ]
     }

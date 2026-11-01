@@ -392,7 +392,7 @@ test("vercel.json routes deliver multi-segment /api paths to their catch-all fun
   }
 });
 
-test("subPathFrom reassembles the path from the pathname and the rewritten remainder", () => {
+test("subPathFrom resolves the path Vercel actually delivers to the function", () => {
   const at = (url) => ({ url });
   assert.equal(subPathFrom(at("/api/academy/courses"), "/api/academy"), "/courses");
   assert.equal(subPathFrom(at("/api/academy"), "/api/academy"), "/");
@@ -403,7 +403,15 @@ test("subPathFrom reassembles the path from the pathname and the rewritten remai
     subPathFrom(at("/api/academy/lessons/lesson-1/complete"), "/api/academy"),
     "/lessons/lesson-1/complete",
   );
-  // The production rewrite: first segment in the pathname, remainder in the query.
+  // What production really hands the function for /api/v1/mt5/status: the route
+  // rewrite shortens the path for route selection only, so the original pathname
+  // survives and `...path` carries the first segment.
+  assert.equal(
+    subPathFrom(at("/api/v1/mt5/status?gm_rest=status&...path=mt5"), "/api/v1"),
+    "/mt5/status",
+  );
+  // The degraded shape, where only the first segment reaches the pathname, is
+  // completed from the query carrier.
   assert.equal(
     subPathFrom(at(`/api/academy/lessons?${REST_PATH_QUERY_KEY}=lesson-1/complete`), "/api/academy"),
     "/lessons/lesson-1/complete",
@@ -419,6 +427,7 @@ test("subPathFrom reassembles the path from the pathname and the rewritten remai
     `/api/v1/status?${REST_PATH_QUERY_KEY}=..`,
     `/api/v1/status?${REST_PATH_QUERY_KEY}=%2e%2e/agents`,
     `/api/v1/status?${REST_PATH_QUERY_KEY}=a/b/c/d/e/f/g/h`,
+    "/api/v1/mt5/%2e%2e/admin/stats",
   ]) {
     assert.equal(subPathFrom(at(url), "/api/v1"), "/", `${url} must not resolve`);
   }
@@ -450,16 +459,24 @@ test("academy catch-all serves deep paths after the Vercel route rewrite", async
   assert.ok(list.body.courses?.length > 0, "the seeded catalogue must be reachable");
   const courseId = list.body.courses[0].id;
 
+  // Exactly the request target production logs showed after the rewrite: the
+  // original pathname plus the platform's own `...path` parameter.
   const deep = await invoke(
     academyCatchAll,
-    makeRequest({ url: `/api/academy/courses?${REST_PATH_QUERY_KEY}=${courseId}`, headers }),
+    makeRequest({
+      url: `/api/academy/courses/${courseId}?${REST_PATH_QUERY_KEY}=${courseId}&...path=courses`,
+      headers,
+    }),
   );
   assert.equal(deep.statusCode, 200, `course ${courseId}: ${JSON.stringify(deep.body)}`);
   assert.equal(deep.body.course?.id, courseId);
 
   const threeSegments = await invoke(
     academyCatchAll,
-    makeRequest({ url: `/api/academy/lessons?${REST_PATH_QUERY_KEY}=lesson-1/complete`, headers }),
+    makeRequest({
+      url: `/api/academy/lessons/lesson-1/complete?${REST_PATH_QUERY_KEY}=lesson-1/complete&...path=lessons`,
+      headers,
+    }),
   );
   // GET on the POST-only completion branch proves all three segments resolved.
   assert.equal(threeSegments.statusCode, 405, `complete: ${JSON.stringify(threeSegments.body)}`);
@@ -474,7 +491,10 @@ test("v1 catch-all serves deep paths after the Vercel route rewrite", async () =
 
   const deep = await invoke(
     v1CatchAll,
-    makeRequest({ url: `/api/v1/security?${REST_PATH_QUERY_KEY}=posture`, headers }),
+    makeRequest({
+      url: `/api/v1/security/posture?${REST_PATH_QUERY_KEY}=posture&...path=security`,
+      headers,
+    }),
   );
   assert.equal(deep.statusCode, 200, `posture: ${JSON.stringify(deep.body)}`);
   assert.notEqual(deep.body?.error?.code, "ENDPOINT_NOT_FOUND");
