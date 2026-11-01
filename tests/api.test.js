@@ -307,6 +307,212 @@ test("write rate limiting returns 429 with Retry-After", async () => {
   resetRateLimits();
 });
 
+test("api rate limiting counts the window down with a fake clock", async () => {
+  resetRateLimits();
+  const realNow = Date.now;
+  const start = 1_700_000_000_000;
+  let clock = start;
+  Date.now = () => clock;
+  const env = { ...process.env, GRANDMASTER_RATE_LIMIT_PER_MINUTE: "1" };
+
+  try {
+    const plan = (request) =>
+      call("POST", "/mastermind/plan", { body: { request }, env, clientKey: "clock-client" });
+
+    assert.equal((await plan("one")).status, 200);
+
+    clock = start + 1;
+    const fresh = await plan("two");
+    assert.equal(fresh.status, 429);
+    assert.equal(fresh.headers["Retry-After"], "60", "a fresh hit still has the whole window");
+
+    clock = start + 30_000;
+    assert.equal((await plan("three")).headers["Retry-After"], "30");
+
+    clock = start + 59_500;
+    const tail = await plan("four");
+    assert.equal(tail.status, 429);
+    assert.equal(tail.headers["Retry-After"], "1", "rounds up and never reports zero");
+    assert.match(tail.body.error.message, /Retry after 1 seconds/);
+
+    clock = start + 59_999;
+    assert.equal((await plan("five")).headers["Retry-After"], "1", "just before expiry");
+
+    clock = start + 60_000;
+    const expired = await plan("six");
+    assert.equal(expired.status, 200, "the window expires at its own length");
+    assert.equal(expired.headers?.["Retry-After"], undefined, "no stale Retry-After after expiry");
+
+    clock = start + 60_001;
+    const reopened = await plan("seven");
+    assert.equal(reopened.status, 429);
+    assert.equal(reopened.headers["Retry-After"], "60", "the new hit starts a fresh window");
+  } finally {
+    Date.now = realNow;
+    resetRateLimits();
+  }
+});
+
+test("v1 capacity cleanup preserves an active client's quota", async () => {
+  resetRateLimits();
+  const realNow = Date.now;
+  const start = 1_700_000_000_000;
+  let clock = start;
+  Date.now = () => clock;
+  const env = { ...process.env, GRANDMASTER_RATE_LIMIT_PER_MINUTE: "1" };
+  const post = (request, clientKey) =>
+    call("POST", "/mastermind/plan", { body: { request }, env, clientKey });
+  const visit = (clientKey) => call("GET", "/nope", { env, clientKey });
+
+  try {
+    // The 404 route is the cheapest path that still passes through the limiter.
+    for (let index = 0; index < 2000; index += 1) {
+      assert.equal((await visit(`flood-${index}`)).status, 404);
+    }
+
+    clock = start + 500;
+    assert.equal((await post("one", "blocked")).status, 200);
+    const blocked = await post("two", "blocked");
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.headers["Retry-After"], "60");
+
+    clock = start + 30_500;
+    assert.equal((await visit("new-visitor")).status, 404);
+
+    const afterCleanup = await post("three", "blocked");
+    assert.equal(afterCleanup.status, 429, "cleanup of another client must not reset this quota");
+    assert.equal(afterCleanup.headers["Retry-After"], "30", "Retry-After stays accurate");
+    assert.match(afterCleanup.body.error.message, /Retry after 30 seconds/);
+
+    clock = start + 60_500;
+    assert.equal((await post("four", "blocked")).status, 200, "the window still expires");
+  } finally {
+    Date.now = realNow;
+    resetRateLimits();
+  }
+});
+
+test("v1 capacity cleanup expires stale buckets first and evicts the coldest", async () => {
+  resetRateLimits();
+  const realNow = Date.now;
+  const start = 1_700_000_000_000;
+  let clock = start;
+  Date.now = () => clock;
+  const env = { ...process.env, GRANDMASTER_RATE_LIMIT_PER_MINUTE: "1" };
+  const post = (request, clientKey) =>
+    call("POST", "/mastermind/plan", { body: { request }, env, clientKey });
+  const visit = (clientKey) => call("GET", "/nope", { env, clientKey });
+
+  try {
+    for (let index = 0; index < 2000; index += 1) {
+      assert.equal((await visit(`stale-${index}`)).status, 404);
+    }
+
+    // Past the window, so the whole stale set is reclaimed before any eviction.
+    clock = start + 61_000;
+    for (let index = 0; index < 1999; index += 1) {
+      assert.equal((await visit(`cold-${index}`)).status, 404);
+    }
+
+    clock = start + 61_500;
+    assert.equal((await post("one", "active")).status, 200);
+    const blocked = await post("two", "active");
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.headers["Retry-After"], "60");
+
+    clock = start + 90_000;
+    assert.equal((await visit("late")).status, 404, "capacity is still available to a new client");
+    const held = await post("three", "active");
+    assert.equal(held.status, 429, "a more recently active client is not the eviction target");
+    assert.equal(held.headers["Retry-After"], "32", `unexpected Retry-After ${held.headers["Retry-After"]}`);
+  } finally {
+    Date.now = realNow;
+    resetRateLimits();
+  }
+});
+
+test("v1 rate limiting isolates client identities and read from write windows", async () => {
+  resetRateLimits();
+  const env = { ...process.env, GRANDMASTER_RATE_LIMIT_PER_MINUTE: "1" };
+  const post = (request, clientKey) =>
+    call("POST", "/mastermind/plan", { body: { request }, env, clientKey });
+
+  assert.equal((await post("one", "iso-a")).status, 200);
+  const exhausted = await post("two", "iso-a");
+  assert.equal(exhausted.status, 429);
+  assert.equal((await post("three", "iso-b")).status, 200, "each client keeps its own quota");
+  assert.equal((await call("GET", "/status", { env, clientKey: "iso-a" })).status, 200);
+  resetRateLimits();
+});
+
+test("v1 answers keep the existing envelope before, during and after cleanup", async () => {
+  resetRateLimits();
+  const env = { ...process.env, GRANDMASTER_RATE_LIMIT_PER_MINUTE: "1" };
+  const post = (request, clientKey) =>
+    call("POST", "/mastermind/plan", { body: { request }, env, clientKey });
+
+  const ok = await post("compat one", "compat-a");
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.ok, true);
+  assert.equal(ok.requestId, ok.body.requestId, "the requestId envelope pair must stay linked");
+  assert.ok(ok.body.data, "a success response still carries a data object");
+
+  const denied = await post("compat two", "compat-a");
+  assert.equal(denied.status, 429);
+  assert.equal(denied.body.ok, false);
+  assert.equal(denied.body.error.code, "RATE_LIMITED");
+  assert.match(denied.body.error.message, /^Too many requests\. Retry after \d+ seconds\.$/);
+  assert.equal(denied.requestId, denied.body.requestId);
+  assert.ok(Number(denied.headers["Retry-After"]) >= 1);
+
+  const missing = await call("GET", "/nope", { env, clientKey: "compat-b" });
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.ok, false);
+  assert.equal(missing.body.error.code, "ENDPOINT_NOT_FOUND");
+
+  // Capacity cleanup must not change the shapes above. The preserved-quota case
+  // is covered by the two fake-clock tests, where the timestamps are controlled.
+  for (let index = 0; index < 2000; index += 1) {
+    assert.equal((await call("GET", "/nope", { env, clientKey: `compat-flood-${index}` })).status, 404);
+  }
+  const afterSweep = await call("GET", "/nope", { env, clientKey: "compat-c" });
+  assert.equal(afterSweep.status, 404);
+  assert.equal(afterSweep.body.error.code, "ENDPOINT_NOT_FOUND");
+  const admitted = await post("compat three", "compat-c");
+  assert.equal(admitted.status, 200, "a fresh identity is unaffected by the sweep");
+  assert.equal(admitted.body.ok, true);
+  const secondDenied = await post("compat four", "compat-c");
+  assert.equal(secondDenied.status, 429);
+  assert.equal(secondDenied.body.error.code, "RATE_LIMITED");
+  resetRateLimits();
+});
+
+test("v1 rate limiter uses bounded cleanup instead of a wholesale clear", () => {
+  const source = fs.readFileSync(new URL("../lib/api/v1.js", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /import \{[^}]*WINDOW_MS[^}]*\} from "\.\.\/rateLimitWindow\.js"/,
+    "the shared window length must be reused, not re-declared",
+  );
+  assert.match(source, /MAX_RATE_BUCKETS/, "capacity must be a named bound");
+  assert.match(source, /sweepBuckets\(/, "cleanup must be a bounded sweep");
+  assert.match(
+    source,
+    /String\(clientKey[^)]*\)\.slice\(0, 120\)/,
+    "the client key must be bounded like every other limiter",
+  );
+  assert.equal(
+    (source.match(/rateBuckets\.clear\(\)/g) || []).length,
+    1,
+    "only resetRateLimits() may clear the map",
+  );
+  assert.doesNotMatch(
+    source,
+    /if \(rateBuckets\.size[^{}]*\)\s*rateBuckets\.clear\(\)/,
+    "no size-triggered wholesale clear may come back",
+  );
+});
+
 test("unknown endpoints return a structured 404", async () => {
   const response = await call("GET", "/nope");
   assert.equal(response.status, 404);

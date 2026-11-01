@@ -236,7 +236,11 @@ export default function AcademyApp() {
 
   const signIn = useCallback(
     async (email, password) => {
-      const data = await api("/auth/login", { method: "POST", body: { email, password } });
+      const data = await api("/auth/login", {
+        method: "POST",
+        body: { email, password },
+        headers: { "x-gm-surface": "academy" },
+      });
       setSession(data.user);
       setNotice("");
       navigate("/academy/courses");

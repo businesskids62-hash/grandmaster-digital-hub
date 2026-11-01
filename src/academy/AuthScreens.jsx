@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { LegalFooter, Notice } from "./components.jsx";
+import OwnershipFooter from "../OwnershipFooter.jsx";
 import { statusMessage } from "./api.js";
 
 function Field({ id, label, type = "text", value, onChange, autoComplete, hint, required = true }) {
@@ -311,6 +312,7 @@ export function LegalScreen({ t, kind, onNavigate }) {
           {t("supportTitle")}
         </button>
       </div>
+      <OwnershipFooter />
     </main>
   );
 }

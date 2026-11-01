@@ -3,31 +3,15 @@ import {
   answerChat,
   sanitizeChatHistory,
 } from "../lib/aiProviders.js";
+import { createChatRateLimiter } from "../lib/chatRateLimit.js";
 import { logEvent } from "../lib/logger.js";
 import { prepare, requireSession, sendJson } from "../lib/vercelHttp.js";
 
-const WINDOW_MS = 60_000;
-const MAX_REQUESTS =
-  Number(process.env.AI_RATE_LIMIT_PER_MINUTE) ||
-  Number(process.env.RATE_LIMIT_PER_MINUTE) ||
-  10;
 const MAX_BODY_BYTES = 64 * 1024;
-const hits = new Map();
 
 // Best-effort per-instance limiter. Serverless instances are ephemeral,
 // so this is a safety net rather than a durable quota.
-function rateLimited(clientKey) {
-  const now = Date.now();
-  const recent = (hits.get(clientKey) || []).filter((time) => now - time < WINDOW_MS);
-  if (recent.length >= MAX_REQUESTS) {
-    hits.set(clientKey, recent);
-    return true;
-  }
-  recent.push(now);
-  hits.set(clientKey, recent);
-  if (hits.size > 1000) hits.clear();
-  return false;
-}
+const chatRateLimit = createChatRateLimiter();
 
 export default async function handler(req, res) {
   const { clientKey, requestId } = prepare(req, res, process.env);
@@ -48,10 +32,12 @@ export default async function handler(req, res) {
 
   if (!(await requireSession(req, res, process.env, requestId))) return;
 
-  if (rateLimited(clientKey)) {
-    res.setHeader("Retry-After", "60");
+  const rate = chatRateLimit.check(clientKey, process.env);
+  if (!rate.allowed) {
+    res.setHeader("Retry-After", String(rate.retryAfter));
     return res.status(429).json({
       error: "Too many requests. Please wait a minute.",
+      retryAfter: rate.retryAfter,
       requestId,
     });
   }

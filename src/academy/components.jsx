@@ -1,4 +1,5 @@
 import React from "react";
+import OwnershipFooter from "../OwnershipFooter.jsx";
 
 export function Notice({ tone = "info", children, onRetry, retryLabel }) {
   if (!children) return null;
@@ -157,15 +158,18 @@ function NavIcon({ name }) {
 export function LegalFooter({ onNavigate, t }) {
   return (
     <footer className="ac-legal-footer">
-      <button type="button" className="ac-link-btn" onClick={() => onNavigate("/privacy")}>
-        {t("privacyTitle")}
-      </button>
-      <button type="button" className="ac-link-btn" onClick={() => onNavigate("/terms")}>
-        {t("termsTitle")}
-      </button>
-      <button type="button" className="ac-link-btn" onClick={() => onNavigate("/support")}>
-        {t("supportTitle")}
-      </button>
+      <div className="ac-auth-links">
+        <button type="button" className="ac-link-btn" onClick={() => onNavigate("/privacy")}>
+          {t("privacyTitle")}
+        </button>
+        <button type="button" className="ac-link-btn" onClick={() => onNavigate("/terms")}>
+          {t("termsTitle")}
+        </button>
+        <button type="button" className="ac-link-btn" onClick={() => onNavigate("/support")}>
+          {t("supportTitle")}
+        </button>
+      </div>
+      <OwnershipFooter />
     </footer>
   );
 }

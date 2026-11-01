@@ -25,6 +25,7 @@ import {
   maskSecrets,
 } from "./utils/debugPack.js";
 import { useSeo } from "./seo.js";
+import OwnershipFooter from "./OwnershipFooter.jsx";
 
 
 /* ==========================================================================
@@ -970,6 +971,7 @@ function AuthScreen({ state, error, busy, onSubmit }) {
           </button>
         )}
       </div>
+      <OwnershipFooter />
     </div>
   );
 }
@@ -3629,6 +3631,7 @@ function App() {
               GRANDMASTER DIGITAL HUB · LEARN · BUILD · EARN
               <br />
               UI status is not proof of backend health or deployment.
+              <OwnershipFooter />
             </footer>
           </main>
         </div>
@@ -3799,6 +3802,7 @@ button.gm-chip:hover{color:var(--gold2);border-color:#f5bc4b77}
 .gm-notice strong{color:var(--gold2)}
 .gm-notice.danger{border-color:#ff737d35;background:#ff737d08}
 .gm-footer{margin-top:45px;padding-top:18px;border-top:1px solid var(--border);color:#727b91;font-size:10px;text-align:center}
+.gm-ownership-footer{color:#727b91;text-align:center}
 .gm-toast{position:fixed;right:20px;bottom:20px;z-index:100;border:1px solid #40d6a044;background:#101c1a;color:var(--green);padding:12px 16px;border-radius:11px;box-shadow:0 10px 35px #0008;font-size:12px}
 .gm-menu-toggle{display:none}
 @media(max-width:1100px){

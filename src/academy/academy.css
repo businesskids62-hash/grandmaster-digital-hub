@@ -813,11 +813,21 @@
 
 .ac-legal-footer {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px 18px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
   margin-top: 24px;
   padding-top: 14px;
   border-top: 1px solid var(--ac-border);
+}
+
+.ac-legal-footer .ac-auth-links {
+  margin-top: 0;
+}
+
+.ac-legal-footer .gm-ownership-footer {
+  color: var(--ac-muted);
+  text-align: left;
 }
 
 /* Loading */

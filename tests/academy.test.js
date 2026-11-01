@@ -111,6 +111,19 @@ async function login(email, password = "student-password-1") {
   });
 }
 
+// Mirrors what the Academy sign-in form sends: the same endpoint plus a surface
+// marker, so the admin-address rule can be proven without touching Hub behaviour.
+function academyLogin(email, password = "student-password-1", options = {}) {
+  return handleLogin({
+    method: "POST",
+    headers: { "x-gm-surface": "academy" },
+    body: { email, password },
+    env: options.env || process.env,
+    clientKey: options.clientKey || nextId("academy-login-client"),
+    requestId: nextId("academy-login-request"),
+  });
+}
+
 function fakeRes() {
   return {
     statusCode: 200,
@@ -534,6 +547,133 @@ test("rate limits and per-account lockout stop repeated attempts", async () => {
   assert.equal(locked.status, 429);
   assert.equal(locked.code, "AUTH_LOCKED");
   assert.ok(locked.retryAfter > 0);
+});
+
+test("auth rate limiting counts the window down instead of claiming a fixed minute", () => {
+  resetAuthRateLimits();
+  const env = { ...process.env, AUTH_RATE_LIMIT_PER_MINUTE: "1" };
+  const start = 1_700_000_000_000;
+
+  assert.equal(checkAuthRateLimit("window-client", env, start).allowed, true);
+
+  const justAfter = checkAuthRateLimit("window-client", env, start + 1);
+  assert.equal(justAfter.allowed, false);
+  assert.equal(justAfter.retryAfter, 60, "a fresh hit still has the whole window");
+
+  assert.equal(checkAuthRateLimit("window-client", env, start + 30_000).retryAfter, 30);
+
+  const tail = checkAuthRateLimit("window-client", env, start + 59_500);
+  assert.equal(tail.allowed, false);
+  assert.equal(tail.retryAfter, 1, "rounds up and never reports zero while blocked");
+
+  const justBeforeExpiry = checkAuthRateLimit("window-client", env, start + 59_999);
+  assert.equal(justBeforeExpiry.allowed, false);
+  assert.equal(justBeforeExpiry.retryAfter, 1);
+
+  const exactExpiry = checkAuthRateLimit("window-client", env, start + 60_000);
+  assert.equal(exactExpiry.allowed, true, "the window expires at its own length");
+  assert.equal(exactExpiry.retryAfter, 0, "no stale retryAfter is returned after expiry");
+
+  const freshWindow = checkAuthRateLimit("window-client", env, start + 60_001);
+  assert.equal(freshWindow.allowed, false);
+  assert.equal(freshWindow.retryAfter, 60, "the new hit starts a fresh window");
+
+  assert.equal(checkAuthRateLimit("window-client", env, start + 120_001).allowed, true);
+  resetAuthRateLimits();
+});
+
+test("429 auth responses carry the counted-down seconds in header and body", async () => {
+  resetAuthRateLimits();
+  const env = { ...process.env, AUTH_RATE_LIMIT_PER_MINUTE: "1" };
+  const clientKey = "window-http-client";
+
+  assert.equal(checkAuthRateLimit(clientKey, env, Date.now() - 15_000).allowed, true);
+
+  const blocked = await handleLogin({
+    method: "POST",
+    headers: {},
+    body: { email: "window@example.com", password: "whatever-password-1" },
+    env,
+    clientKey,
+    requestId: "req-window-countdown",
+  });
+
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.body.code, "AUTH_RATE_LIMITED");
+  const seconds = Number(blocked.headers["Retry-After"]);
+  assert.ok(Number.isInteger(seconds) && seconds > 0, "Retry-After must be whole seconds");
+  assert.ok(seconds < 60, "the oldest hit is 15s old, so a full minute is a lie");
+  assert.equal(blocked.body.retryAfter, seconds);
+  assert.match(blocked.body.error, new RegExp(`${seconds}s`));
+  resetAuthRateLimits();
+});
+
+test("Academy sign-in refuses the configured admin address before any password check", async () => {
+  resetAuthRateLimits();
+  const adminEmail = "owner@example.com";
+  const before = await db.get("SELECT failed_attempts, session_version FROM users WHERE email = ?", [
+    adminEmail,
+  ]);
+  assert.ok(before, "the seeded admin row is needed for this proof");
+
+  for (const submitted of [adminEmail, "OWNER@Example.COM", `  ${adminEmail}  `, "Owner@Example.com "]) {
+    const denied = await academyLogin(submitted, "definitely-not-the-admin-password");
+    assert.equal(denied.status, 400, `refused for ${JSON.stringify(submitted)}`);
+    assert.equal(denied.body.code, "ADMIN_LOGIN_SURFACE");
+    assert.equal(denied.body.authenticated, false);
+    assert.equal(denied.body.user, undefined, "no session is issued");
+    assert.equal(denied.headers["Set-Cookie"], undefined, "no cookie is issued");
+    assert.ok(!JSON.stringify(denied).includes(adminEmail), "the admin address is never echoed");
+  }
+
+  const after = await db.get("SELECT failed_attempts, session_version FROM users WHERE email = ?", [
+    adminEmail,
+  ]);
+  assert.equal(after.failed_attempts, before.failed_attempts, "refusal happens before credentials");
+  assert.equal(after.session_version, before.session_version);
+
+  const hubAdmin = await login(adminEmail, process.env.ADMIN_PASSWORD);
+  assert.equal(hubAdmin.status, 200, "the Hub keeps the per-user admin login");
+  assert.equal(hubAdmin.body.user.role, "admin");
+
+  assert.equal((await signup("academy.surface@example.com")).status, 201);
+  const student = await academyLogin("academy.surface@example.com");
+  assert.equal(student.status, 200, "student sign-in on the Academy is unchanged");
+  assert.equal(student.body.user.role, "student");
+  resetAuthRateLimits();
+});
+
+test("an admin refusal on the Academy surface still consumes a rate-limit slot", async () => {
+  resetAuthRateLimits();
+  const env = { ...process.env, AUTH_RATE_LIMIT_PER_MINUTE: "1" };
+  const clientKey = "academy-denial-client";
+
+  const denied = await academyLogin("owner@example.com", "definitely-not-the-admin-password", {
+    env,
+    clientKey,
+  });
+  assert.equal(denied.status, 400);
+
+  const next = await academyLogin("another.learner@example.com", "student-password-1", {
+    env,
+    clientKey,
+  });
+  assert.equal(next.status, 429, "the refusal counted toward the limiter");
+  assert.equal(next.body.code, "AUTH_RATE_LIMITED");
+  resetAuthRateLimits();
+});
+
+test("an unset ADMIN_EMAIL never turns an Academy email login into an admin session", async () => {
+  resetAuthRateLimits();
+  const env = { ...process.env, ADMIN_EMAIL: "" };
+
+  const result = await academyLogin("nobody@example.com", "wrong-password-value", { env });
+
+  assert.equal(result.status, 401);
+  assert.equal(result.body.code, "AUTH_INVALID_CREDENTIALS");
+  assert.equal(result.body.user, undefined);
+  assert.equal(result.headers["Set-Cookie"], undefined);
+  resetAuthRateLimits();
 });
 
 test("password reset tokens are single use, expiring and version-bumping", async () => {

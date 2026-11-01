@@ -314,6 +314,42 @@ test("health rate limiting is per client, bounded and expires", () => {
   resetHealthRateLimits();
 });
 
+test("health rate limiting counts the window down instead of claiming a fixed minute", () => {
+  resetHealthRateLimits();
+  const env = { HEALTH_RATE_LIMIT_PER_MINUTE: "1" };
+  const start = 1_000_000;
+
+  assert.equal(checkHealthRateLimit("window-client", env, start).allowed, true);
+
+  const justAfter = checkHealthRateLimit("window-client", env, start + 1);
+  assert.equal(justAfter.allowed, false);
+  assert.equal(justAfter.retryAfter, 60, "a fresh hit still has the whole window");
+  assert.equal(healthRateLimitHeaders(justAfter)["Retry-After"], "60");
+
+  assert.equal(checkHealthRateLimit("window-client", env, start + 45_000).retryAfter, 15);
+
+  const tail = checkHealthRateLimit("window-client", env, start + 59_001);
+  assert.equal(tail.allowed, false);
+  assert.equal(tail.retryAfter, 1, "rounds up and never reports zero while blocked");
+  assert.equal(healthRateLimitHeaders(tail)["Retry-After"], "1");
+
+  const justBeforeExpiry = checkHealthRateLimit("window-client", env, start + 59_999);
+  assert.equal(justBeforeExpiry.allowed, false);
+  assert.equal(justBeforeExpiry.retryAfter, 1);
+
+  const exactExpiry = checkHealthRateLimit("window-client", env, start + 60_000);
+  assert.equal(exactExpiry.allowed, true, "the window expires at its own length");
+  assert.equal(exactExpiry.retryAfter, 0, "no stale retryAfter is returned after expiry");
+  assert.equal(exactExpiry.remaining, 0);
+
+  const freshWindow = checkHealthRateLimit("window-client", env, start + 60_001);
+  assert.equal(freshWindow.allowed, false);
+  assert.equal(freshWindow.retryAfter, 60, "the new hit starts a fresh window");
+
+  assert.equal(checkHealthRateLimit("window-client", env, start + 120_002).allowed, true);
+  resetHealthRateLimits();
+});
+
 test("Vercel liveness handler is public, minimal and rate limited", async () => {
   resetHealthRateLimits();
   const req = {

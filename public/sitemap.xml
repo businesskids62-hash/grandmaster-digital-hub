@@ -1,32 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://YOUR-DOMAIN.com/academy</loc>
+    <loc>https://grandmaster-digital-hub.vercel.app/academy</loc>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://YOUR-DOMAIN.com/academy/login</loc>
+    <loc>https://grandmaster-digital-hub.vercel.app/academy/login</loc>
     <changefreq>monthly</changefreq>
     <priority>0.5</priority>
   </url>
   <url>
-    <loc>https://YOUR-DOMAIN.com/academy/signup</loc>
+    <loc>https://grandmaster-digital-hub.vercel.app/academy/signup</loc>
     <changefreq>monthly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
-    <loc>https://YOUR-DOMAIN.com/privacy</loc>
+    <loc>https://grandmaster-digital-hub.vercel.app/privacy</loc>
     <changefreq>yearly</changefreq>
     <priority>0.3</priority>
   </url>
   <url>
-    <loc>https://YOUR-DOMAIN.com/terms</loc>
+    <loc>https://grandmaster-digital-hub.vercel.app/terms</loc>
     <changefreq>yearly</changefreq>
     <priority>0.3</priority>
   </url>
   <url>
-    <loc>https://YOUR-DOMAIN.com/support</loc>
+    <loc>https://grandmaster-digital-hub.vercel.app/support</loc>
     <changefreq>yearly</changefreq>
     <priority>0.3</priority>
   </url>

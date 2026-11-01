@@ -11,4 +11,4 @@ Disallow: /academy/quizzes
 Disallow: /academy/forgot
 Disallow: /academy/reset
 
-Sitemap: https://YOUR-DOMAIN.com/sitemap.xml
+Sitemap: https://grandmaster-digital-hub.vercel.app/sitemap.xml

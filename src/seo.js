@@ -1,10 +1,7 @@
 import { useEffect } from "react";
 
-/**
- * Replace this placeholder with the deployed origin before submitting the
- * sitemap and requesting indexing.
- */
-export const SITE_ORIGIN = "https://YOUR-DOMAIN.com";
+/** Owner-approved canonical production origin used for every canonical/OG URL. */
+export const SITE_ORIGIN = "https://grandmaster-digital-hub.vercel.app";
 
 function absoluteUrl(pathname) {
   const clean = String(pathname || "/").split("?")[0].split("#")[0];

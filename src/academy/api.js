@@ -19,8 +19,8 @@ export function readCookie(name) {
   return "";
 }
 
-export async function api(path, { method = "GET", body, signal } = {}) {
-  const headers = { Accept: "application/json" };
+export async function api(path, { method = "GET", body, signal, headers: extraHeaders } = {}) {
+  const headers = { Accept: "application/json", ...(extraHeaders || {}) };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && method !== "HEAD") {
     const csrf = readCookie("gm_csrf");

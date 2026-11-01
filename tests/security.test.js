@@ -36,6 +36,11 @@ const {
   verifySessionToken,
 } = await import("../lib/auth/session.js");
 const { resetAuthRateLimits } = await import("../lib/auth/routes.js");
+const { createChatRateLimiter, MAX_CHAT_CLIENTS } = await import(
+  "../lib/chatRateLimit.js"
+);
+const { WINDOW_MS } = await import("../lib/rateLimitWindow.js");
+const { clientKeyFrom } = await import("../lib/vercelHttp.js");
 
 const TOKEN = "security-control-token-1234567890";
 const authorized = { "x-grandmaster-token": TOKEN };
@@ -557,6 +562,186 @@ test("Vercel chat adapter requires a session, rejects oversized bodies and rate 
   assert.equal(statuses[2], 429);
 });
 
+test("chat limiter shares the window helper: admits, blocks and counts down without reaching zero", () => {
+  const { check } = createChatRateLimiter();
+  const env = { AI_RATE_LIMIT_PER_MINUTE: "3" };
+  const t0 = 1_700_000_000_000;
+  const key = "203.0.113.201";
+
+  // First requests behave as before: they are admitted and never carry a wait.
+  const admitted = [
+    check(key, env, t0),
+    check(key, env, t0 + 1_000),
+    check(key, env, t0 + 2_000),
+  ];
+  assert.deepEqual(admitted.map((rate) => rate.allowed), [true, true, true]);
+  assert.deepEqual(admitted.map((rate) => rate.retryAfter), [0, 0, 0]);
+  assert.deepEqual(admitted.map((rate) => rate.limit), [3, 3, 3]);
+
+  const blocked = check(key, env, t0 + 3_000);
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.retryAfter, 57);
+  assert.equal(
+    check(key, env, t0 + 30_000).retryAfter,
+    30,
+    "Retry-After must shrink as the oldest hit ages",
+  );
+  assert.equal(
+    check(key, env, t0 + WINDOW_MS - 1).retryAfter,
+    1,
+    "a still-blocked request must never be told to retry in 0 seconds",
+  );
+
+  // Once every hit has aged out the client is admitted again.
+  assert.equal(check(key, env, t0 + 63_000).allowed, true);
+});
+
+test("chat limiter sweeps expired clients instead of clearing every client's state", () => {
+  const env = { AI_RATE_LIMIT_PER_MINUTE: "2" };
+  const { check, tracked } = createChatRateLimiter();
+  const t0 = 1_700_000_000_000;
+
+  // Saturate the map with clients that will all expire together.
+  for (let index = 0; index < MAX_CHAT_CLIENTS; index += 1) {
+    check(`flood-${index}`, env, t0);
+  }
+  assert.ok(tracked() <= MAX_CHAT_CLIENTS, `bound must hold (got ${tracked()})`);
+
+  // One client that is genuinely blocked in the current window.
+  check("active", env, t0 + WINDOW_MS + 1);
+  check("active", env, t0 + WINDOW_MS + 2);
+  assert.equal(check("active", env, t0 + WINDOW_MS + 3).allowed, false);
+
+  // Every expired flood bucket is gone, and only the expired ones.
+  assert.ok(
+    tracked() < 10,
+    `expired clients must be swept, not kept or wiped wholesale (still ${tracked()})`,
+  );
+  assert.equal(check("flood-0", env, t0 + WINDOW_MS + 4).allowed, true);
+
+  // The blocked client kept its hits: a blanket Map.clear() would have
+  // silently re-admitted it, which is the defect this sweep replaces.
+  assert.equal(
+    check("active", env, t0 + WINDOW_MS + 5).allowed,
+    false,
+    "cleanup must not erase an active client's rate-limit state",
+  );
+});
+
+test("Vercel chat 429 reports an accurate, decreasing Retry-After that matches its body", async () => {
+  const cookie = sessionCookie();
+  const realNow = Date.now;
+  let clock = realNow();
+  const send = async () => {
+    const res = fakeRes();
+    await chatHandler(
+      {
+        method: "POST",
+        headers: { "x-forwarded-for": "203.0.113.202", cookie },
+        body: { message: "hello" },
+        socket: {},
+      },
+      res,
+    );
+    return res;
+  };
+
+  try {
+    Date.now = () => clock;
+    // AI_RATE_LIMIT_PER_MINUTE is 2 in this file, so two requests get through.
+    assert.equal((await send()).statusCode, 503);
+    assert.equal((await send()).statusCode, 503);
+
+    const blocked = await send();
+    assert.equal(blocked.statusCode, 429);
+    const first = Number(blocked.headers["retry-after"]);
+    assert.equal(blocked.body.retryAfter, first, "header and body must agree");
+    assert.ok(first > 0 && first <= 60, `unexpected Retry-After ${first}`);
+
+    clock += 20_000;
+    const aged = await send();
+    assert.equal(aged.statusCode, 429);
+    const second = Number(aged.headers["retry-after"]);
+    assert.equal(aged.body.retryAfter, second);
+    assert.ok(second < first, `Retry-After must count down (${first} -> ${second})`);
+
+    clock += 60_000;
+    assert.notEqual((await send()).statusCode, 429, "the expired window must re-admit");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("Express chat 429 header and body agree and count down over the window", async () => {
+  const app = createApp();
+  const server = await new Promise((resolve) => {
+    const instance = app.listen(0, "127.0.0.1", () => resolve(instance));
+  });
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  const cookie = sessionCookie();
+  const realNow = Date.now;
+  let clock = realNow();
+
+  const post = async () => {
+    const response = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", cookie },
+      body: JSON.stringify({ message: "hello" }),
+    });
+    const body = await response.json();
+    return { status: response.status, header: response.headers.get("retry-after"), body };
+  };
+
+  try {
+    Date.now = () => clock;
+    assert.equal((await post()).status, 503);
+    assert.equal((await post()).status, 503);
+
+    const blocked = await post();
+    assert.equal(blocked.status, 429);
+    const first = Number(blocked.header);
+    assert.equal(blocked.body.retryAfter, first, "header and body must agree");
+    assert.ok(first > 0 && first <= 60, `unexpected Retry-After ${first}`);
+    assert.equal(
+      blocked.body.error,
+      "Too many requests. Please wait a minute and try again.",
+      "the 429 response shape must stay as it was",
+    );
+
+    clock += 25_000;
+    const aged = await post();
+    assert.equal(aged.status, 429);
+    const second = Number(aged.header);
+    assert.equal(aged.body.retryAfter, second);
+    assert.ok(second < first, `Retry-After must count down (${first} -> ${second})`);
+
+    clock += 60_000;
+    assert.notEqual((await post()).status, 429, "the expired window must re-admit");
+  } finally {
+    Date.now = realNow;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("both chat limiters share the window helper and no longer hard-code a 60 second wait", () => {
+  const read = (relative) =>
+    fs.readFileSync(new URL(`../${relative}`, import.meta.url), "utf8");
+
+  for (const file of ["api/chat.js", "server/server.js"]) {
+    const source = read(file);
+    assert.match(source, /lib\/chatRateLimit\.js/, `${file} must use the shared chat limiter`);
+    assert.doesNotMatch(source, /Retry-After",\s*"60"/, `${file} must not send a fixed Retry-After`);
+    assert.doesNotMatch(source, /retryAfter:\s*60\b/, `${file} must not report a fixed retryAfter`);
+  }
+
+  const shared = read("lib/chatRateLimit.js");
+  assert.match(shared, /from "\.\/rateLimitWindow\.js"/, "the chat limiter must reuse the helper");
+  assert.match(shared, /activeWindow\(/);
+  assert.match(shared, /remainingSeconds\(/);
+  assert.doesNotMatch(shared, /hits\.clear\(/, "cleanup must never drop every client at once");
+});
+
 test("session tokens are signed, expire and reject tampering", () => {
   const token = createSessionToken(process.env);
   const now = Date.now();
@@ -740,4 +925,55 @@ test("v1 rejects path segment chains longer than the supported depth", async () 
   // segment-count rule and not a rejection of the resource itself.
   const shallow = await call("GET", "/status");
   assert.equal(shallow.status, 200);
+});
+
+// Client IP trust boundary. Vercel overwrites x-forwarded-for with the client's
+// public IP and does not forward an external one (documented at
+// https://vercel.com/docs/headers/request-headers; a Trusted Proxy that could
+// preserve one is Enterprise-only), so the adapters may key on that header. The
+// self-hosted Express server sets no `trust proxy`, so its boundary is the
+// socket peer. These tests pin both of those facts without asserting anything
+// about how the platform behaves beyond its own documentation.
+test("a spoofed forwarded header cannot buy a new chat quota on Express", async () => {
+  const app = createApp();
+  const server = await new Promise((resolve) => {
+    const instance = app.listen(0, "127.0.0.1", () => resolve(instance));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const cookie = sessionCookie();
+
+  // AI_RATE_LIMIT_PER_MINUTE is 2 here and every request arrives from
+  // 127.0.0.1. Three different spoofed values must still share one bucket.
+  const post = async (spoofed) => {
+    const headers = { "Content-Type": "application/json", cookie };
+    if (spoofed) headers["x-forwarded-for"] = spoofed;
+    const response = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ message: "hello" }),
+    });
+    return response.status;
+  };
+
+  try {
+    assert.equal(await post("203.0.113.77"), 503);
+    assert.equal(await post("203.0.113.88"), 503);
+    assert.equal(await post("203.0.113.99"), 429, "a spoofed header must not reset the quota");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("forwarded-header client keys follow the documented adapter contract", () => {
+  assert.equal(
+    clientKeyFrom({ headers: { "x-forwarded-for": "203.0.113.9, 10.0.0.1" }, socket: {} }),
+    "203.0.113.9",
+    "the adapter takes the public client address that Vercel reports first",
+  );
+  assert.equal(
+    clientKeyFrom({ headers: {}, socket: { remoteAddress: "198.51.100.24" } }),
+    "198.51.100.24",
+    "with no forwarded header the socket peer is the key",
+  );
+  assert.equal(clientKeyFrom({ headers: {}, socket: {} }), "unknown");
 });

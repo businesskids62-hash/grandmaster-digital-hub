@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 
 const root = new URL("../", import.meta.url);
 const read = (relative) => fs.readFileSync(new URL(relative, root), "utf8");
@@ -10,18 +11,65 @@ const OFFLINE_HTML = "<title>offline</title>";
 
 const manifest = JSON.parse(read("public/manifest.webmanifest"));
 
-test("manifest identifies the Hub, so an installed shortcut opens /", () => {
+test("manifest carries the approved Academy identity and still opens /", () => {
   assert.equal(manifest.id, "/");
   assert.equal(manifest.start_url, "/");
   assert.equal(manifest.scope, "/");
-  assert.equal(manifest.name, "Grandmaster Digital Hub");
+  assert.equal(manifest.name, "Grandmaster Academy - Personal AI Teacher");
+  assert.equal(manifest.short_name, "Grandmaster");
+  assert.equal(manifest.description, "Har student ka apna AI Ustaad - Urdu English");
 });
 
 test("manifest keeps the installable shell settings and icons", () => {
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.theme_color, "#0b1220");
+  assert.equal(manifest.background_color, "#0b1220");
   assert.ok(manifest.icons.length >= 3);
   assert.ok(manifest.icons.some((icon) => icon.purpose === "maskable"));
+  for (const icon of manifest.icons) {
+    assert.ok(
+      fs.existsSync(new URL(`public${icon.src}`, root)),
+      `manifest references an icon asset that does not exist: ${icon.src}`,
+    );
+  }
+});
+
+test("the maskable asset is a distinct file, not a copy of the any-purpose icon", () => {
+  const sha = (relative) =>
+    createHash("sha256").update(fs.readFileSync(new URL(relative, root))).digest("hex");
+  const readHeader = (relative) => {
+    const buffer = fs.readFileSync(new URL(relative, root));
+    assert.equal(buffer.toString("hex", 0, 8), "89504e470d0a1a0a", `${relative} is not a PNG`);
+    return {
+      width: buffer.readUInt32BE(16),
+      height: buffer.readUInt32BE(20),
+      bitDepth: buffer[24],
+      colorType: buffer[25],
+      interlace: buffer[28],
+      bytes: buffer.length,
+    };
+  };
+
+  const anyIcon = readHeader("public/icons/icon-512.png");
+  const maskable = readHeader("public/icons/icon-maskable-512.png");
+  for (const [name, header] of [["any", anyIcon], ["maskable", maskable]]) {
+    assert.equal(header.width, 512, `${name} icon must stay 512px wide`);
+    assert.equal(header.height, 512, `${name} icon must stay 512px tall`);
+    assert.equal(header.bitDepth, 8);
+    assert.equal(header.colorType, 6, `${name} icon must stay 8-bit RGBA`);
+    assert.equal(header.interlace, 0, `${name} icon must stay non-interlaced`);
+  }
+  // A byte-identical "maskable" file was the Mission 013 defect: it cropped the
+  // crown on Android launchers, so the two assets must never be the same bytes.
+  assert.notEqual(sha("public/icons/icon-maskable-512.png"), sha("public/icons/icon-512.png"));
+  assert.notEqual(maskable.bytes, anyIcon.bytes);
+
+  const purposes = manifest.icons.map((icon) => `${icon.src}=${icon.purpose}`).sort();
+  assert.ok(purposes.includes("/icons/icon-512.png=any"), "the tight-crop icon stays purpose=any");
+  assert.ok(
+    purposes.includes("/icons/icon-maskable-512.png=maskable"),
+    "the padded icon stays the only purpose=maskable asset",
+  );
 });
 
 test("router sends / to the Hub and /academy to the Academy", () => {

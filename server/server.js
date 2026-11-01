@@ -20,6 +20,7 @@ import {
   verifyProviderCached,
 } from "../lib/aiProviders.js";
 import { getAllowedOrigins } from "../lib/cors.js";
+import { createChatRateLimiter } from "../lib/chatRateLimit.js";
 import { handleV1 } from "../lib/api/v1.js";
 import {
   checkHealthRateLimit,
@@ -52,11 +53,6 @@ import { isAdmin, resolveSession } from "../lib/auth/guards.js";
 
 const PORT = Number(process.env.PORT) || 8000;
 const HOST = process.env.HOST || "127.0.0.1";
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX =
-  Number(process.env.AI_RATE_LIMIT_PER_MINUTE) ||
-  Number(process.env.RATE_LIMIT_PER_MINUTE) ||
-  10;
 
 function requestIdFrom(req) {
   const incoming = req.get?.("x-request-id");
@@ -103,25 +99,19 @@ export function createApp() {
     }),
   );
 
-  // In-memory rate limiter for the chat endpoint
-  const hits = new Map();
+  // In-memory rate limiter for the chat endpoint. The window maths, the per
+  // client bound and the expired-bucket sweep are shared with the Vercel
+  // function through lib/chatRateLimit.js, so both surfaces answer identically.
+  const chatRateLimit = createChatRateLimiter();
   function rateLimit(req, res, next) {
-    const now = Date.now();
-    const key = req.ip || "unknown";
-    const recent = (hits.get(key) || []).filter(
-      (time) => now - time < RATE_LIMIT_WINDOW_MS,
-    );
-
-    if (recent.length >= RATE_LIMIT_MAX) {
-      res.setHeader("Retry-After", "60");
+    const rate = chatRateLimit.check(req.ip, process.env);
+    if (!rate.allowed) {
+      res.setHeader("Retry-After", String(rate.retryAfter));
       return res.status(429).json({
         error: "Too many requests. Please wait a minute and try again.",
-        retryAfter: 60,
+        retryAfter: rate.retryAfter,
       });
     }
-
-    recent.push(now);
-    hits.set(key, recent);
     return next();
   }
 
