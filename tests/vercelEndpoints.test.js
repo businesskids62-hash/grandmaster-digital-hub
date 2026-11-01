@@ -297,12 +297,31 @@ test("missing session authority fails closed through the consolidated routes", a
 
 // Vercel maps an api/**/[...path].js file to exactly one URL segment, so a deeper
 // call such as /api/v1/mt5/status used to die on the platform 404 before any
-// handler ran. vercel.json `routes` now forward the remainder as a query
-// parameter; these tests lock the config, the rewrite shape and the adapters.
+// handler ran. vercel.json `routes` now shorten the path to the one segment the
+// function owns and forward the remainder through a request.query transform;
+// these tests lock the config, the rewrite shape and the adapters.
+function substitute(value, match) {
+  return String(value ?? "").replace(/\$(\w+)/g, (_all, name) => match.groups[name] ?? "");
+}
+
 function rewrittenUrl(rule, url) {
   const match = new RegExp(rule.src).exec(url);
   if (!match) return null;
-  return rule.dest.replace(/\$(\w+)/g, (_all, name) => match.groups[name] ?? "");
+  return substitute(rule.dest, match);
+}
+
+// A rewrite's own querystring is not carried into the function dispatch, so the
+// remainder must travel as a transform instead.
+function remainderOf(rule, url) {
+  const match = new RegExp(rule.src).exec(url);
+  if (!match) return null;
+  const transform = (rule.transforms || []).find(
+    (entry) =>
+      entry.type === "request.query" &&
+      (entry.target || {}).key === REST_PATH_QUERY_KEY &&
+      entry.op === "set",
+  );
+  return transform ? substitute(transform.args, match) : null;
 }
 
 function routeRulesFor(url) {
@@ -334,17 +353,16 @@ test("vercel.json routes deliver multi-segment /api paths to their catch-all fun
     // pathname is neither a static file nor a function entry — only the
     // auto-generated catch-all rule further down the table can dispatch it.
     assert.equal(rules[0].continue, true, `${url} must continue on to the catch-all rule`);
-    const dest = new URL(rewritten, "http://localhost");
     const prefix = url.startsWith("/api/v1") ? "/api/v1" : "/api/academy";
     assert.ok(
-      servedByCatchAll.get(prefix).test(dest.pathname),
+      servedByCatchAll.get(prefix).test(rewritten),
       `${url} → ${rewritten} must land on the ${prefix} catch-all`,
     );
-    const rest = dest.searchParams.get(REST_PATH_QUERY_KEY);
+    const rest = remainderOf(rules[0], url);
     assert.ok(rest, `${url} must carry the remainder as ${REST_PATH_QUERY_KEY}`);
     assert.equal(
-      `${dest.pathname.split("/").pop()}/${rest}`,
-      url.slice(prefix.length + 1),
+      `${rewritten.split("/").pop()}/${rest}`,
+      url.slice(prefix.length + 1).split("?")[0],
       `${url} must keep every original segment in order`,
     );
   }

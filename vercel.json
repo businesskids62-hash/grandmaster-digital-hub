@@ -3,13 +3,29 @@
   "routes": [
     {
       "src": "/api/academy/(?<head>[^/]+)/(?<rest>.+)",
-      "dest": "/api/academy/$head?gm_rest=$rest",
-      "continue": true
+      "dest": "/api/academy/$head",
+      "continue": true,
+      "transforms": [
+        {
+          "type": "request.query",
+          "op": "set",
+          "target": { "key": "gm_rest" },
+          "args": "$rest"
+        }
+      ]
     },
     {
       "src": "/api/v1/(?<head>[^/]+)/(?<rest>.+)",
-      "dest": "/api/v1/$head?gm_rest=$rest",
-      "continue": true
+      "dest": "/api/v1/$head",
+      "continue": true,
+      "transforms": [
+        {
+          "type": "request.query",
+          "op": "set",
+          "target": { "key": "gm_rest" },
+          "args": "$rest"
+        }
+      ]
     }
   ],
   "rewrites": [
