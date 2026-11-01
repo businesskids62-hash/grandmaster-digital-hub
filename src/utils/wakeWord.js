@@ -87,10 +87,23 @@ export function startWakeWord({ onTrigger, lang = "ur-PK" } = {}) {
     }
   };
 
+  let fatalMicError = false;
+
   rec.onerror = (event) => {
     if (event.error === "aborted") return;
-    if (event.error === "not-allowed") {
-      console.error("[WakeWord] Mic permission blocked.");
+    if (
+      event.error === "not-allowed" ||
+      event.error === "service-not-allowed" ||
+      event.error === "audio-capture"
+    ) {
+      // onend fires after every error. Without this latch the restart below
+      // re-arms a mic that can never succeed, once every 500ms, forever.
+      fatalMicError = true;
+      console.warn(
+        event.error === "not-allowed"
+          ? "[WakeWord] Mic permission blocked — wake word paused."
+          : `[WakeWord] No microphone available (${event.error}) — wake word paused.`,
+      );
       return;
     }
     // Auto-restart on transient errors
@@ -103,7 +116,7 @@ export function startWakeWord({ onTrigger, lang = "ur-PK" } = {}) {
 
   rec.onend = () => {
     // Keep mic always ON: auto-restart unless we explicitly stopped
-    if (!rec._stopped) {
+    if (!rec._stopped && !fatalMicError) {
       restartTimer = setTimeout(() => {
         try { startListening(); } catch {}
       }, 500);
@@ -111,6 +124,7 @@ export function startWakeWord({ onTrigger, lang = "ur-PK" } = {}) {
   };
 
   function startListening() {
+    if (fatalMicError) return;
     rec._stopped = false;
     try {
       rec.start();
