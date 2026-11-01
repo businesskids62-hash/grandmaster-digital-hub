@@ -330,6 +330,10 @@ test("vercel.json routes deliver multi-segment /api paths to their catch-all fun
     assert.equal(rules.length, 1, `${url} must match exactly one routing rule`);
     const rewritten = rewrittenUrl(rules[0], url);
     assert.ok(rewritten, `${url} must be rewritten`);
+    // A matched route ends routing unless it continues, and the rewritten
+    // pathname is neither a static file nor a function entry — only the
+    // auto-generated catch-all rule further down the table can dispatch it.
+    assert.equal(rules[0].continue, true, `${url} must continue on to the catch-all rule`);
     const dest = new URL(rewritten, "http://localhost");
     const prefix = url.startsWith("/api/v1") ? "/api/v1" : "/api/academy";
     assert.ok(

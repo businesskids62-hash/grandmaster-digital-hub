@@ -3,11 +3,13 @@
   "routes": [
     {
       "src": "/api/academy/(?<head>[^/]+)/(?<rest>.+)",
-      "dest": "/api/academy/$head?gm_rest=$rest"
+      "dest": "/api/academy/$head?gm_rest=$rest",
+      "continue": true
     },
     {
       "src": "/api/v1/(?<head>[^/]+)/(?<rest>.+)",
-      "dest": "/api/v1/$head?gm_rest=$rest"
+      "dest": "/api/v1/$head?gm_rest=$rest",
+      "continue": true
     }
   ],
   "rewrites": [
