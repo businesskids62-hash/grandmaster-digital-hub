@@ -24,7 +24,13 @@ delete process.env.GEMINI_MODEL;
 delete process.env.GEMINI_FALLBACK_MODEL;
 
 const { handleV1, resetRateLimits } = await import("../lib/api/v1.js");
-const { applyCors, isOriginAllowed, getAllowedOrigins } = await import("../lib/cors.js");
+const {
+  applyCors,
+  isOriginAllowed,
+  getAllowedOrigins,
+  isVercelDeploymentOrigin,
+  isSameOriginRequest,
+} = await import("../lib/cors.js");
 const { providerHealthLabel } = await import("../lib/aiProviders.js");
 const chatHandler = (await import("../api/chat.js")).default;
 const { createApp } = await import("../server/server.js");
@@ -396,6 +402,139 @@ test("CORS allow-list rejects unlisted origins and never accepts a wildcard", as
   );
   assert.equal(answered, true);
   assert.equal(deniedRes.statusCode, 403);
+});
+
+// Preview hostnames come from `vercel ls`: <project>-<hash>-<team>.vercel.app, so
+// no static CORS_ALLOWED_ORIGINS entry can ever list them.
+const PREVIEW_ONLY_ENV = {
+  NODE_ENV: "production",
+  VERCEL: "1",
+  CORS_ALLOWED_ORIGINS: "",
+  ALLOWED_ORIGINS: "",
+};
+const OWN_PREVIEW = "https://grandmaster-digital-etmmzfm8r-businesskids62-4987.vercel.app";
+
+test("this project's Vercel previews are allowed while other tenants and spoofs stay denied", () => {
+  const allowed = [
+    OWN_PREVIEW,
+    "https://grandmaster-digital-42g474pfo-businesskids62-4987.vercel.app",
+    "https://grandmaster-digital-git-phase1-academy-businesskids62-4987.vercel.app",
+  ];
+  for (const origin of allowed) {
+    assert.equal(isOriginAllowed(origin, PREVIEW_ONLY_ENV), true, `${origin} is our own preview`);
+  }
+
+  const denied = [
+    "https://grandmaster-digital-etmmzfm8r-evil-team-9999.vercel.app",
+    "https://someone-else-scope-businesskids62-49877.vercel.app",
+    "https://grandmaster-digital-hub.vercel.app.evil.test",
+    "https://attacker.test/grandmaster-digital-x-businesskids62-4987.vercel.app",
+    "https://evil.vercel.app@attacker.test",
+    "http://grandmaster-digital-x-businesskids62-4987.vercel.app",
+    "https://grandmaster-digital-x-businesskids62-4987.vercel.app:4443",
+    "https://grandmaster-digital-x-businesskids62-4987.vercel.app/pwned",
+    "https://grandmaster-digital-x-businesskids62-4987.vercel.app?x=1",
+    "https://vercel.app",
+    "https://evil-localhost:3000.test",
+    "http://localhost.evil.test",
+    "http://127.0.0.1:5173.evil.test",
+  ];
+  for (const origin of denied) {
+    assert.equal(isOriginAllowed(origin, PREVIEW_ONLY_ENV), false, `${origin} must stay denied`);
+  }
+
+  // A bare `.vercel.app` suffix is never trust on its own: credentialed CORS must
+  // not extend to every deployment on the platform.
+  assert.equal(
+    isVercelDeploymentOrigin("https://attacker-project.vercel.app", PREVIEW_ONLY_ENV),
+    false,
+  );
+  // Production without an allow-list still fails closed for its own alias, which
+  // is not a deployment-shaped hostname.
+  assert.equal(
+    isOriginAllowed("https://grandmaster-digital-hub.vercel.app", PREVIEW_ONLY_ENV),
+    false,
+  );
+
+  // Port 3000 joins the dev defaults, and only outside production.
+  assert.equal(
+    isOriginAllowed("http://localhost:3000", {
+      NODE_ENV: "development",
+      CORS_ALLOWED_ORIGINS: "",
+    }),
+    true,
+  );
+  assert.equal(
+    isOriginAllowed("http://localhost:3000", PREVIEW_ONLY_ENV),
+    false,
+    "dev origins must not leak into production",
+  );
+});
+
+test("a deployment answers its own page instead of 403-ing its login POST", () => {
+  const alias = "https://grandmaster-digital-hub.vercel.app";
+  const emptyAllowList = { NODE_ENV: "production", CORS_ALLOWED_ORIGINS: "" };
+
+  // Browsers send Origin on same-origin POSTs too, so an exact-only allow-list
+  // makes a deployment reject the page it served. Host equality is the fix.
+  const selfRes = fakeRes();
+  const selfAnswered = applyCors(
+    { method: "POST", headers: { origin: alias, host: "grandmaster-digital-hub.vercel.app" } },
+    selfRes,
+    emptyAllowList,
+  );
+  assert.equal(selfAnswered, false, "same-origin request reaches its handler");
+  assert.equal(selfRes.headers["access-control-allow-origin"], alias);
+  assert.equal(selfRes.headers["access-control-allow-credentials"], "true");
+
+  // Exact host equality only: the alias origin against a different host is a
+  // cross-origin request and still fails closed.
+  const crossRes = fakeRes();
+  const crossAnswered = applyCors(
+    { method: "POST", headers: { origin: alias, host: "other-app.vercel.app" } },
+    crossRes,
+    emptyAllowList,
+  );
+  assert.equal(crossAnswered, true);
+  assert.equal(crossRes.statusCode, 403);
+
+  // A host header with a port, path or credentials appended is not the same host.
+  assert.equal(
+    isSameOriginRequest({ headers: { host: "grandmaster-digital-hub.vercel.app:8443" } }, alias),
+    false,
+  );
+});
+
+test("preflight admits every header the SPA actually sends", () => {
+  const res = fakeRes();
+  const answered = applyCors(
+    { method: "OPTIONS", headers: { origin: OWN_PREVIEW, host: OWN_PREVIEW.slice(8) } },
+    res,
+    PREVIEW_ONLY_ENV,
+  );
+  assert.equal(answered, true);
+  assert.equal(res.statusCode, 204, "preflight is answered without reaching a handler");
+  assert.equal(res.body, null);
+  assert.equal(res.headers["access-control-allow-origin"], OWN_PREVIEW);
+  assert.equal(res.headers.vary, "Origin");
+
+  // src/academy/api.js sends X-CSRF-Token, AcademyApp.jsx sends x-gm-surface and
+  // BrowserOperator.jsx sends X-Grandmaster-Operator-Token; any omission here
+  // fails the browser preflight before the request is ever made.
+  const headers = res.headers["access-control-allow-headers"];
+  for (const name of [
+    "Content-Type",
+    "Authorization",
+    "X-CSRF-Token",
+    "X-Grandmaster-Token",
+    "X-Grandmaster-Operator-Token",
+    "X-Gm-Surface",
+    "X-Request-Id",
+  ]) {
+    assert.ok(headers.includes(name), `allow-headers must list ${name}`);
+  }
+  assert.equal(headers.includes("*"), false, "no wildcard with credentials enabled");
+  assert.ok(res.headers["access-control-allow-methods"].includes("POST"));
 });
 
 test("Express app enforces auth, CORS, body limits and honest health labels end to end", async () => {

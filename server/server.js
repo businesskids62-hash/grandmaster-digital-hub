@@ -19,7 +19,7 @@ import {
   verificationHttpStatus,
   verifyProviderCached,
 } from "../lib/aiProviders.js";
-import { getAllowedOrigins } from "../lib/cors.js";
+import { isOriginAllowed } from "../lib/cors.js";
 import { createChatRateLimiter } from "../lib/chatRateLimit.js";
 import { handleV1 } from "../lib/api/v1.js";
 import {
@@ -86,11 +86,12 @@ export function createApp() {
   });
   app.use(express.json({ limit: "64kb" }));
 
-  const allowedOrigins = getAllowedOrigins(process.env);
   app.use(
     cors({
+      // One predicate for both surfaces, so the Express server and the Vercel
+      // adapters can never disagree about which origin is allowed.
       origin(origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
+        if (!origin || isOriginAllowed(origin, process.env)) {
           return callback(null, true);
         }
         return callback(new Error("Origin not allowed by CORS."));
