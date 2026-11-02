@@ -1,6 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
@@ -49,9 +49,18 @@ const ROTATED_SECRET = "rotated-secret-passphrase-2";
 const PATH_LEAK = /[A-Za-z]:[\\/]|\/tmp\/|\/var\/task/;
 
 // Every test gets its own scratch database, so nothing here can reach the
-// repository's real data directory.
+// repository's real data directory. Each file lives in its own sub-directory
+// rather than directly in the data directory, because the guard counts creating
+// a database inside a protected directory as a live write, and the directory the
+// ambient configuration resolves to is protected.
+function scratchCase(name) {
+  const dir = path.join(dataDir, name);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 function envFor(name) {
-  return { ...process.env, GRANDMASTER_DB_PATH: path.join(dataDir, `${name}.db`) };
+  return { ...process.env, GRANDMASTER_DB_PATH: path.join(scratchCase(name), "academy.db") };
 }
 
 async function openDb(name) {
@@ -78,9 +87,9 @@ function assertNoPathOrSecret(value, label) {
   );
 }
 
-async function runCli(args, envOverride = {}) {
+async function runCli(args, envOverride = {}, runOptions = {}) {
   const result = await execFileAsync(process.execPath, [cliPath, ...args], {
-    cwd: repoRoot,
+    cwd: runOptions.cwd || repoRoot,
     env: { ...process.env, NODE_NO_WARNINGS: "1", ...envOverride },
   }).catch((error) => ({
     code: typeof error?.code === "number" ? error.code : 1,
@@ -92,6 +101,90 @@ async function runCli(args, envOverride = {}) {
     stdout: String(result.stdout || ""),
     stderr: String(result.stderr || ""),
   };
+}
+
+// A terminal that answers nothing: exactly what a CI run looks like, and the
+// reason a live target cannot be confirmed there.
+function deadStdin() {
+  return { isTTY: false, setRawMode: undefined };
+}
+
+/**
+ * Creates a real scratch database at a path this test declares to be protected,
+ * through the CLI's own two-step live confirmation. Nothing here points at the
+ * repository's live database; `protectedFile` is always under the scratch root.
+ */
+async function provisionScratchLive(protectedFile) {
+  const stdout = stdoutRecorder();
+  const exitCode = await runCliInProcess({
+    argv: [
+      "bootstrap",
+      "--email",
+      ADMIN_EMAIL,
+      "--database",
+      protectedFile,
+      "--create-new",
+      "--allow-live",
+    ],
+    env: {
+      ...process.env,
+      ADMIN_PASSWORD: ADMIN_SECRET,
+      GRANDMASTER_DB_PATH: protectedFile,
+      GRANDMASTER_DATA_DIR: path.dirname(protectedFile),
+    },
+    stdin: ttyStdin(["LIVE"]),
+    stdout,
+  });
+  assert.equal(exitCode, 0, "the operator who typed LIVE gets the database");
+  assert.equal(
+    stdout.lines.join(""),
+    "Type LIVE to write to the live database: LIVE\nTARGET=live\nRESULT=ADMIN_CREATED\n",
+  );
+  return stdout;
+}
+
+/**
+ * Runs one filesystem experiment and hands back a record of every filesystem
+ * call the CLI made, so a rule that promises not to touch the disk can be
+ * measured instead of trusted.
+ */
+async function withFilesystemSpy(run) {
+  const calls = [];
+  const originals = {
+    existsSync: fs.existsSync,
+    statSync: fs.statSync,
+    mkdirSync: fs.mkdirSync,
+    openSync: fs.openSync,
+    readFileSync: fs.readFileSync,
+    realpathNative: fs.realpathSync.native,
+    linkSync: fs.linkSync,
+    symlinkSync: fs.symlinkSync,
+  };
+  const track = (name, original) =>
+    function tracked(...args) {
+      calls.push(`${name}:${String(args[0])}`);
+      return original.apply(fs, args);
+    };
+  fs.existsSync = track("existsSync", originals.existsSync);
+  fs.statSync = track("statSync", originals.statSync);
+  fs.mkdirSync = track("mkdirSync", originals.mkdirSync);
+  fs.openSync = track("openSync", originals.openSync);
+  fs.readFileSync = track("readFileSync", originals.readFileSync);
+  fs.realpathSync.native = track("realpathSync.native", originals.realpathNative);
+  fs.linkSync = track("linkSync", originals.linkSync);
+  fs.symlinkSync = track("symlinkSync", originals.symlinkSync);
+  try {
+    return { result: await run(), calls, originals };
+  } finally {
+    fs.existsSync = originals.existsSync;
+    fs.statSync = originals.statSync;
+    fs.mkdirSync = originals.mkdirSync;
+    fs.openSync = originals.openSync;
+    fs.readFileSync = originals.readFileSync;
+    fs.realpathSync.native = originals.realpathNative;
+    fs.linkSync = originals.linkSync;
+    fs.symlinkSync = originals.symlinkSync;
+  }
 }
 
 // The CLI calls whatever the ambient configuration resolves to a live target.
@@ -945,8 +1038,8 @@ test("A1-4 typing LIVE at a terminal lets a declared-live target through and say
 });
 
 test("A1-5 a missing target is created only by bootstrap with --create-new", async () => {
-  const bootstrapFile = path.join(dataDir, "a1-create-rule.db");
-  const resetFile = path.join(dataDir, "a1-reset-rule.db");
+  const bootstrapFile = path.join(scratchCase("a1-create-rule"), "probe.db");
+  const resetFile = path.join(scratchCase("a1-reset-rule"), "probe.db");
 
   const plain = await runCli(
     ["bootstrap", "--email", ADMIN_EMAIL, "--database", bootstrapFile],
@@ -1018,5 +1111,615 @@ test("A1-6 switch flags are parsed as flags and every safeguard output stays a c
     assert.equal(output.stderr, "");
   }
 
-  assert.equal(fs.existsSync(path.join(dataDir, "a1-switches.db")), true);
+  assert.equal(fs.existsSync(file), true);
+});
+
+/* ---------------------------------------------------------------------------
+ * A3 - the live-target guard reads a file's identity, not its spelling.
+ *
+ * Every case below declares some path under the scratch root to be the
+ * protected database and then reaches it through an alias. None of them points
+ * at the repository's real database, and a refusal is always proven by the
+ * protected file's hash not moving.
+ * ------------------------------------------------------------------------ */
+
+function caseDir(name) {
+  const dir = path.join(dataDir, `a3-${name}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function liveGuardEnv(protectedFile, overrides = {}) {
+  return {
+    ADMIN_PASSWORD: ADMIN_SECRET,
+    GRANDMASTER_DB_PATH: protectedFile,
+    GRANDMASTER_DATA_DIR: path.dirname(protectedFile),
+    ...overrides,
+  };
+}
+
+// C2 asks for the platform to prove itself before the guard is trusted: a
+// hardlink must answer with one identity, and a reparse point must resolve.
+test("A3-0 this platform reports one (dev, ino) pair for a hardlink and resolves a junction", async (t) => {
+  const dir = caseDir("platform");
+  const original = path.join(dir, "original.db");
+  fs.writeFileSync(original, "BYTES");
+  const sibling = path.join(dir, "sibling.db");
+  try {
+    fs.linkSync(original, sibling);
+  } catch (error) {
+    t.skip(`SKIP: hardlink creation failed on this volume (${error.code || error.name}); file identity is unavailable here`);
+    return;
+  }
+  const first = fs.statSync(fs.realpathSync.native(original), { bigint: true });
+  const second = fs.statSync(fs.realpathSync.native(sibling), { bigint: true });
+  assert.equal(typeof first.dev, "bigint", "the stats must be read as BigInts");
+  assert.equal(typeof first.ino, "bigint", "the stats must be read as BigInts");
+  assert.equal(
+    first.dev === second.dev && first.ino === second.ino,
+    true,
+    "identity is unreliable on this platform: a hardlink does not share its (dev, ino) pair",
+  );
+  assert.notEqual(
+    fs.realpathSync.native(original),
+    fs.realpathSync.native(sibling),
+    "resolution alone cannot see a hardlink, which is why the pair is compared",
+  );
+
+  const link = path.join(dir, "junction");
+  try {
+    fs.symlinkSync(dir, link, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    t.skip(`SKIP: reparse-point creation failed (${error.code || error.name})`);
+    return;
+  }
+  assert.equal(
+    fs.realpathSync.native(path.join(link, "original.db")),
+    fs.realpathSync.native(original),
+    "a reparse point resolves to the protected file",
+  );
+});
+
+test("A3-1 a junction alias of a protected database is a live target, and LIVE still unlocks it", async (t) => {
+  const dir = caseDir("junction");
+  const liveDir = path.join(dir, "live");
+  fs.mkdirSync(liveDir);
+  const protectedFile = path.join(liveDir, "academy.db");
+  await provisionScratchLive(protectedFile);
+  const hashBefore = sha256File(protectedFile);
+
+  const link = path.join(dir, "alias-dir");
+  try {
+    fs.symlinkSync(liveDir, link, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    t.skip(`SKIP: junction creation failed (${error.code || error.name})`);
+    return;
+  }
+  const aliasTarget = path.join(link, "academy.db");
+  assert.notEqual(path.resolve(aliasTarget), protectedFile, "the alias is a different spelling");
+
+  const refused = await runCli(
+    ["reset-password", "--email", ADMIN_EMAIL, "--database", aliasTarget],
+    liveGuardEnv(protectedFile),
+  );
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stdout, "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+  assertNoPathOrSecret(`${refused.stdout}${refused.stderr}`, "junction refusal");
+  assert.equal(sha256File(protectedFile), hashBefore, "a refused alias never opens the database");
+
+  const withFlagOnly = await runCli(
+    ["reset-password", "--email", ADMIN_EMAIL, "--database", aliasTarget, "--allow-live"],
+    liveGuardEnv(protectedFile),
+  );
+  assert.equal(withFlagOnly.stdout, "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+
+  // The two-step confirmation is not weakened by the alias: it still works.
+  const stdout = stdoutRecorder();
+  const exitCode = await runCliInProcess({
+    argv: ["bootstrap", "--email", ADMIN_EMAIL, "--database", aliasTarget, "--allow-live"],
+    env: liveGuardEnv(protectedFile),
+    stdin: ttyStdin(["LIVE"]),
+    stdout,
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(
+    stdout.lines.join(""),
+    "Type LIVE to write to the live database: LIVE\nTARGET=live\nRESULT=ADMIN_ALREADY_PROVISIONED\n",
+  );
+  assertNoPathOrSecret(stdout.lines.join(""), "junction live confirmation");
+});
+
+test("A3-2 a symbolic-link alias of a protected database is a live target", async (t) => {
+  const dir = caseDir("symlink");
+  const liveDir = path.join(dir, "live");
+  fs.mkdirSync(liveDir);
+  const protectedFile = path.join(liveDir, "academy.db");
+  await provisionScratchLive(protectedFile);
+  const hashBefore = sha256File(protectedFile);
+
+  const aliasFile = path.join(dir, "alias.db");
+  try {
+    fs.symlinkSync(protectedFile, aliasFile, "file");
+  } catch (error) {
+    t.skip(`SKIP: symbolic-link creation needs privilege this process does not have (${error.code || error.name}); on Windows this is EPERM without Developer Mode or admin rights`);
+    return;
+  }
+  const refused = await runCli(
+    ["reset-password", "--email", ADMIN_EMAIL, "--database", aliasFile],
+    liveGuardEnv(protectedFile),
+  );
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stdout, "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+  assertNoPathOrSecret(`${refused.stdout}${refused.stderr}`, "symlink refusal");
+  assert.equal(sha256File(protectedFile), hashBefore);
+});
+
+test("A3-3 a hardlink sibling of a protected database is a live target", async (t) => {
+  const dir = caseDir("hardlink");
+  const protectedFile = path.join(dir, "academy.db");
+  await provisionScratchLive(protectedFile);
+  const hashBefore = sha256File(protectedFile);
+
+  const aliasFile = path.join(dir, "sibling.db");
+  try {
+    fs.linkSync(protectedFile, aliasFile);
+  } catch (error) {
+    t.skip(`SKIP: hardlink creation failed on this volume (${error.code || error.name})`);
+    return;
+  }
+  assert.notEqual(
+    fs.realpathSync.native(aliasFile),
+    fs.realpathSync.native(protectedFile),
+    "resolution cannot see a hardlink, so this is the alias the pair comparison exists for",
+  );
+
+  const refused = await runCli(
+    ["reset-password", "--email", ADMIN_EMAIL, "--database", aliasFile],
+    liveGuardEnv(protectedFile),
+  );
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stdout, "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+  assertNoPathOrSecret(`${refused.stdout}${refused.stderr}`, "hardlink refusal");
+  assert.equal(sha256File(protectedFile), hashBefore, "the protected database is never opened");
+  assert.equal(fs.existsSync(aliasFile), true, "the refusal happened on identity, not existence");
+});
+
+test("A3-4 a short (8.3) path alias of a protected database is a live target", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("SKIP: 8.3 short names are a Windows filesystem feature");
+    return;
+  }
+  const dir = caseDir("shortname");
+  const liveDir = path.join(dir, "live");
+  fs.mkdirSync(liveDir);
+  const protectedFile = path.join(liveDir, "academy.db");
+  await provisionScratchLive(protectedFile);
+  const hashBefore = sha256File(protectedFile);
+
+  let shortDir;
+  try {
+    shortDir = execSync(`cmd /c for %A in ("${liveDir}") do @echo %~sA`, {
+      encoding: "utf8",
+    }).trim();
+  } catch (error) {
+    t.skip(`SKIP: the short-name query could not run (${String(error.message || error).slice(0, 60)})`);
+    return;
+  }
+  if (shortDir.toLowerCase() === liveDir.toLowerCase()) {
+    t.skip("SKIP: 8.3 short-name generation is disabled on this volume, so no alias can be built");
+    return;
+  }
+
+  const aliasTarget = path.join(shortDir, "academy.db");
+  const refused = await runCli(
+    ["reset-password", "--email", ADMIN_EMAIL, "--database", aliasTarget],
+    liveGuardEnv(protectedFile),
+  );
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stdout, "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+  assertNoPathOrSecret(`${refused.stdout}${refused.stderr}`, "short-name refusal");
+  assert.equal(sha256File(protectedFile), hashBefore);
+});
+
+test("A3-5 an extended-length, device or UNC target is refused without touching the filesystem", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("SKIP: these namespace prefixes are Windows path syntax");
+    return;
+  }
+  const env = {
+    ...process.env,
+    ADMIN_PASSWORD: ADMIN_SECRET,
+    GRANDMASTER_DB_PATH: "",
+    GRANDMASTER_DATA_DIR: caseDir("namespace"),
+  };
+
+  for (const raw of [
+    "\\\\?\\D:\\anywhere\\academy.db",
+    "//?/D:/anywhere/academy.db",
+    "\\\\?\\UNC\\host\\share\\academy.db",
+    "\\\\.\\PHYSICALDRIVE0",
+    "\\\\host\\share\\academy.db",
+    "//host/share/academy.db",
+  ]) {
+    const { result, calls } = await withFilesystemSpy(() =>
+      runCliInProcess({
+        argv: ["bootstrap", "--email", ADMIN_EMAIL, "--database", raw],
+        env,
+        stdin: deadStdin(),
+        stdout: stdoutRecorder(),
+      }),
+    );
+    assert.equal(result, 1, `${raw.slice(0, 12)} is refused`);
+    assert.equal(calls.length, 0, `no filesystem call may happen for ${raw.slice(0, 12)}`);
+  }
+
+  const stdout = stdoutRecorder();
+  const exitCode = await runCliInProcess({
+    argv: ["reset-password", "--email", ADMIN_EMAIL, "--database", "\\\\?\\C:\\x\\academy.db"],
+    env,
+    stdin: deadStdin(),
+    stdout,
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(stdout.lines.join(""), "ERROR=BOOTSTRAP_TARGET_UNSUPPORTED\n");
+  assertNoPathOrSecret(stdout.lines.join(""), "unsupported target refusal");
+
+  // The rule filters operator input, never a resolved path: a legitimate target
+  // in its own directory still works.
+  const okDir = path.join(env.GRANDMASTER_DATA_DIR, "ok");
+  fs.mkdirSync(okDir, { recursive: true });
+  const ok = await runCli(
+    ["bootstrap", "--email", ADMIN_EMAIL, "--database", path.join(okDir, "fine.db"), "--create-new"],
+    env,
+  );
+  assert.equal(ok.stdout, "TARGET=custom\nRESULT=ADMIN_CREATED\n");
+});
+
+test("A3-6 a target that only the ambient configuration resolves to is a live target", async () => {
+  const dir = caseDir("env-mismatch");
+  const dataDirCase = path.join(dir, "store");
+  fs.mkdirSync(dataDirCase, { recursive: true });
+  const protectedFile = path.join(dataDirCase, "academy.db");
+  await provisionScratchLive(protectedFile);
+  const hashBefore = sha256File(protectedFile);
+
+  // GRANDMASTER_DB_PATH points somewhere else while GRANDMASTER_DATA_DIR points
+  // at the real store: the target is what the data directory resolves to.
+  const refused = await runCli(
+    ["reset-password", "--email", ADMIN_EMAIL, "--database", protectedFile],
+    {
+      ADMIN_PASSWORD: ADMIN_SECRET,
+      GRANDMASTER_DB_PATH: path.join(dir, "elsewhere.db"),
+      GRANDMASTER_DATA_DIR: dataDirCase,
+    },
+  );
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stdout, "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+  assertNoPathOrSecret(`${refused.stdout}${refused.stderr}`, "env mismatch refusal");
+  assert.equal(sha256File(protectedFile), hashBefore);
+});
+
+test("A3-7 a relative, dotted, case-folded or mixed-separator spelling is the same live target", async () => {
+  const dir = caseDir("spellings");
+  const protectedFile = path.join(dir, "academy.db");
+  await provisionScratchLive(protectedFile);
+  const hashBefore = sha256File(protectedFile);
+
+  const spellings = [
+    ["relative", "academy.db", dir],
+    ["dot-dot", path.join(dir, "live", "..", "academy.db"), repoRoot],
+    ["forward-slash", dir.replace(/\\/g, "/") + "/academy.db", repoRoot],
+  ];
+  if (process.platform === "win32") {
+    spellings.push(["case-variant", path.join(dir, "ACADEMY.DB"), repoRoot]);
+  }
+
+  for (const [name, target, cwd] of spellings) {
+    const refused = await runCli(
+      ["reset-password", "--email", ADMIN_EMAIL, "--database", target],
+      liveGuardEnv(protectedFile),
+      { cwd },
+    );
+    assert.equal(refused.code, 1, `${name} is refused`);
+    assert.equal(refused.stdout, "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n", name);
+    assertNoPathOrSecret(`${refused.stdout}${refused.stderr}`, `${name} refusal`);
+  }
+  assert.equal(sha256File(protectedFile), hashBefore, "no spelling opened the database");
+});
+
+test("A3-8 creating a database inside a protected directory is a live operation", async () => {
+  const dir = caseDir("ambient-dir");
+  const store = path.join(dir, "store");
+  fs.mkdirSync(store, { recursive: true });
+
+  const brandNew = path.join(store, "brand-new.db");
+  const ambient = await runCli(
+    ["bootstrap", "--email", ADMIN_EMAIL, "--database", brandNew, "--create-new"],
+    {
+      ADMIN_PASSWORD: ADMIN_SECRET,
+      GRANDMASTER_DB_PATH: "",
+      GRANDMASTER_DATA_DIR: store,
+    },
+  );
+  assert.equal(ambient.code, 1);
+  assert.equal(ambient.stdout, "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+  assert.equal(fs.existsSync(brandNew), false, "a refused live write creates nothing");
+  assertNoPathOrSecret(`${ambient.stdout}${ambient.stderr}`, "ambient directory refusal");
+
+  // The same creation through a reparse point at that directory is refused too.
+  let aliasDir;
+  let skipped = null;
+  try {
+    aliasDir = path.join(dir, "alias");
+    fs.symlinkSync(store, aliasDir, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    skipped = error.code || error.name;
+  }
+  if (skipped) {
+    // The direct case above already pins the rule; the alias variant is not
+    // buildable here, and that is reported rather than counted as a pass.
+    return;
+  }
+  const aliased = await runCli(
+    ["bootstrap", "--email", ADMIN_EMAIL, "--database", path.join(aliasDir, "other.db"), "--create-new"],
+    { ADMIN_PASSWORD: ADMIN_SECRET, GRANDMASTER_DB_PATH: "", GRANDMASTER_DATA_DIR: store },
+  );
+  assert.equal(aliased.stdout, "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+  assert.equal(fs.existsSync(path.join(store, "other.db")), false);
+});
+
+test("A3-9 an ordinary scratch database and a parent that does not exist yet stay custom", async () => {
+  const dir = caseDir("custom-paths");
+  const ambient = {
+    ADMIN_PASSWORD: ADMIN_SECRET,
+    GRANDMASTER_DB_PATH: "",
+    GRANDMASTER_DATA_DIR: dir,
+  };
+
+  // A missing parent directory cannot be an alias of anything, so creating
+  // through it stays an ordinary custom write.
+  const nested = path.join(dir, "not", "there", "yet.db");
+  const created = await runCli(
+    ["bootstrap", "--email", ADMIN_EMAIL, "--database", nested, "--create-new"],
+    ambient,
+  );
+  assert.equal(created.code, 0);
+  assert.equal(created.stdout, "TARGET=custom\nRESULT=ADMIN_CREATED\n");
+  assert.equal(fs.existsSync(nested), true);
+
+  // A valid custom database in its own directory keeps working, both commands.
+  const own = path.join(dir, "own", "academy.db");
+  fs.mkdirSync(path.dirname(own), { recursive: true });
+  const first = await runCli(
+    ["bootstrap", "--email", ADMIN_EMAIL, "--database", own, "--create-new"],
+    ambient,
+  );
+  assert.equal(first.stdout, "TARGET=custom\nRESULT=ADMIN_CREATED\n");
+  const rotated = await runCli(
+    ["reset-password", "--email", ADMIN_EMAIL, "--database", own],
+    { ...ambient, ADMIN_PASSWORD: ROTATED_SECRET },
+  );
+  assert.equal(rotated.stdout, "TARGET=custom\nRESULT=ADMIN_PASSWORD_RESET\n");
+  for (const output of [created, first, rotated]) {
+    assertNoPathOrSecret(`${output.stdout}${output.stderr}`, "custom write output");
+  }
+
+  // A custom target whose parent exists but is empty is still not live.
+  const sibling = path.join(dir, "own", "second.db");
+  const second = await runCli(
+    ["bootstrap", "--email", ADMIN_EMAIL, "--database", sibling, "--create-new"],
+    ambient,
+  );
+  assert.equal(second.stdout, "TARGET=custom\nRESULT=ADMIN_CREATED\n");
+});
+
+test("A3-10 a target whose identity cannot be read or compared is refused, not trusted", async () => {
+  // The protected store is a sibling directory, so the target below is a plain
+  // custom file: every refusal measured here is caused by the missing identity
+  // and not by where the file happens to sit.
+  const dir = caseDir("unreadable");
+  const ambient = path.join(dir, "ambient");
+  fs.mkdirSync(ambient, { recursive: true });
+  const file = path.join(dir, "target.db");
+  const env = {
+    ...process.env,
+    ADMIN_PASSWORD: ADMIN_SECRET,
+    GRANDMASTER_DB_PATH: "",
+    GRANDMASTER_DATA_DIR: ambient,
+  };
+
+  const control = stdoutRecorder();
+  const controlExit = await runCliInProcess({
+    argv: ["bootstrap", "--email", ADMIN_EMAIL, "--database", file, "--create-new"],
+    env,
+    stdin: deadStdin(),
+    stdout: control,
+  });
+  assert.equal(controlExit, 0, "a readable identity leaves the target custom");
+  assert.equal(control.lines.join(""), "TARGET=custom\nRESULT=ADMIN_CREATED\n");
+  const bytesBefore = sha256File(file);
+
+  // C5: resolution fails for a file that is there, so it is treated as live.
+  const realNative = fs.realpathSync.native;
+  fs.realpathSync.native = (target, ...rest) => {
+    if (target === file) throw new Error("EPERM injected");
+    return realNative(target, ...rest);
+  };
+  try {
+    const stdout = stdoutRecorder();
+    const exitCode = await runCliInProcess({
+      argv: ["reset-password", "--email", ADMIN_EMAIL, "--database", file],
+      env,
+      stdin: deadStdin(),
+      stdout,
+    });
+    assert.equal(exitCode, 1);
+    assert.equal(stdout.lines.join(""), "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+    assertNoPathOrSecret(stdout.lines.join(""), "fail-closed refusal");
+
+    // A non-interactive caller cannot clear the gate even with the flag, which is
+    // what keeps CI away from a path the guard is unsure about.
+    const flagged = stdoutRecorder();
+    const flaggedExit = await runCliInProcess({
+      argv: [
+        "reset-password",
+        "--email",
+        ADMIN_EMAIL,
+        "--database",
+        file,
+        "--allow-live",
+      ],
+      env,
+      stdin: deadStdin(),
+      stdout: flagged,
+    });
+    assert.equal(flaggedExit, 1);
+    assert.equal(flagged.lines.join(""), "ERROR=BOOTSTRAP_LIVE_TARGET_NOT_CONFIRMED\n");
+    assertNoPathOrSecret(flagged.lines.join(""), "flagged non-interactive refusal");
+  } finally {
+    fs.realpathSync.native = realNative;
+  }
+
+  // C2: a volume that answers with a zero file index cannot be compared against.
+  const realStat = fs.statSync;
+  fs.statSync = (target, options) => {
+    const stats = realStat(target, options);
+    if (target === fs.realpathSync.native(file)) {
+      return { ...stats, dev: 0n, ino: 0n };
+    }
+    return stats;
+  };
+  try {
+    const stdout = stdoutRecorder();
+    const exitCode = await runCliInProcess({
+      argv: ["bootstrap", "--email", ADMIN_EMAIL, "--database", file],
+      env,
+      stdin: deadStdin(),
+      stdout,
+    });
+    assert.equal(exitCode, 1);
+    assert.equal(stdout.lines.join(""), "ERROR=BOOTSTRAP_TARGET_IDENTITY_UNRELIABLE\n");
+    assertNoPathOrSecret(stdout.lines.join(""), "unreliable identity refusal");
+  } finally {
+    fs.statSync = realStat;
+  }
+
+  assert.equal(sha256File(file), bytesBefore, "no refusal opened the database");
+});
+
+test("A3-10b a stat call that returns no bigint pair is refused as unreliable", async () => {
+  const dir = caseDir("stat-shape");
+  const ambient = path.join(dir, "ambient");
+  fs.mkdirSync(ambient, { recursive: true });
+  const file = path.join(dir, "plain.db");
+  fs.writeFileSync(file, "NOT-A-DATABASE");
+  const realStat = fs.statSync;
+  fs.statSync = (target, options) => {
+    const stats = realStat(target, options);
+    if (target === fs.realpathSync.native(file)) {
+      return { ...stats, dev: 1n, ino: undefined };
+    }
+    return stats;
+  };
+  try {
+    const stdout = stdoutRecorder();
+    const exitCode = await runCliInProcess({
+      argv: ["bootstrap", "--email", ADMIN_EMAIL, "--database", file],
+      env: {
+        ...process.env,
+        ADMIN_PASSWORD: ADMIN_SECRET,
+        GRANDMASTER_DB_PATH: "",
+        GRANDMASTER_DATA_DIR: ambient,
+      },
+      stdin: deadStdin(),
+      stdout,
+    });
+    assert.equal(exitCode, 1);
+    assert.equal(stdout.lines.join(""), "ERROR=BOOTSTRAP_TARGET_IDENTITY_UNRELIABLE\n");
+  } finally {
+    fs.statSync = realStat;
+  }
+  assert.equal(fs.readFileSync(file, "utf8"), "NOT-A-DATABASE", "the file was never opened");
+});
+
+test("A3-11 an identity that moves between validation and open aborts before the credential write", async () => {
+  // The change is injected, not raced: this pins that the re-read after
+  // `DatabaseSync` opens is compared and acted on. The window itself stays a
+  // residual limitation - see the A3 report.
+  const dir = caseDir("drift");
+  const ambient = path.join(dir, "ambient");
+  fs.mkdirSync(ambient, { recursive: true });
+  const file = path.join(dir, "target.db");
+  const decoy = path.join(dir, "decoy.db");
+  fs.writeFileSync(decoy, "DECOY");
+  const env = {
+    ...process.env,
+    ADMIN_PASSWORD: ADMIN_SECRET,
+    GRANDMASTER_DB_PATH: "",
+    GRANDMASTER_DATA_DIR: ambient,
+  };
+
+  await resetDatabaseForTests();
+  const seeding = getDatabase({ ...env, GRANDMASTER_DB_PATH: file });
+  await seeding.get("SELECT COUNT(*) AS c FROM users");
+  await closeDatabase();
+
+  const realNative = fs.realpathSync.native;
+  let reads = 0;
+  fs.realpathSync.native = (target, ...rest) => {
+    if (target === file) {
+      reads += 1;
+      if (reads > 1) return decoy;
+    }
+    return realNative(target, ...rest);
+  };
+  let exitCode;
+  let stdout;
+  try {
+    stdout = stdoutRecorder();
+    exitCode = await runCliInProcess({
+      argv: ["bootstrap", "--email", ADMIN_EMAIL, "--database", file],
+      env,
+      stdin: deadStdin(),
+      stdout,
+    });
+  } finally {
+    fs.realpathSync.native = realNative;
+  }
+
+  assert.ok(reads > 1, "the identity was read again after the handle opened");
+  assert.equal(exitCode, 1);
+  assert.equal(stdout.lines.join(""), "TARGET=custom\nERROR=BOOTSTRAP_TARGET_IDENTITY_CHANGED\n");
+  assertNoPathOrSecret(stdout.lines.join(""), "drift refusal");
+
+  // No byte-for-byte comparison of the target: opening the handle is allowed to
+  // rewrite its WAL header, so what is provable is that no credential landed.
+  assert.equal(fs.readFileSync(decoy, "utf8"), "DECOY", "the alias was never written through");
+
+  await resetDatabaseForTests();
+  const db = getDatabase({ ...env, GRANDMASTER_DB_PATH: file });
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM users")).c, 0, "no account was created");
+  assert.equal((await db.get("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'")).c, 0);
+  assert.equal(
+    (await db.all("SELECT id FROM audit_log WHERE action = ?", [ADMIN_BOOTSTRAP_ACTIONS.PROVISION]))
+      .length,
+    0,
+    "no bootstrap audit row was written",
+  );
+  await closeDatabase();
+});
+
+test("A3-12 the guard reads bigint identity and never calls itself race-free", () => {
+  const cliSource = sourceText(path.posix.join("scripts", "bootstrap-admin.mjs"));
+  assert.match(cliSource, /realpathSync\.native/, "the alias must be resolved, not assumed");
+  assert.match(cliSource, /statSync\(canonical, \{ bigint: true \}\)/, "the pair must be read as BigInts");
+  assert.match(cliSource, /first\.dev === second\.dev && first\.ino === second\.ino/);
+  assert.ok(!/race-free/i.test(cliSource), "the residual window must not be described as closed");
+  assert.match(cliSource, /does not close it/, "the residual window is named as one");
+  assert.match(cliSource, /BOOTSTRAP_TARGET_UNSUPPORTED/, "the raw namespaces need their own code");
+  assert.doesNotMatch(
+    cliSource,
+    /emit\([^)]*resolvedTarget|emit\([^)]*liveDatabasePath/,
+    "a target path never reaches the output",
+  );
 });
