@@ -4,6 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { resolveDbPath } from "../lib/db/sqliteAdapter.js";
+import { isPostgresUrl } from "../lib/db/postgresAdapter.js";
 import { getDatabase, closeDatabase } from "../lib/db/index.js";
 import {
   ADMIN_BOOTSTRAP_CODES,
@@ -449,49 +450,49 @@ export async function run({
     return fail(CLI_CODES.ENVIRONMENT_FORBIDDEN);
   }
 
+  const postgres = isPostgresUrl(env?.DATABASE_URL);
+
   const email = String(parsed.options.email || env?.ADMIN_EMAIL || "").trim();
   if (!email) return fail(CLI_CODES.USAGE_INVALID);
 
-  // There is deliberately no default target. An operator write must name the
-  // file it means, because the ambient configuration can point at the live
-  // database and a bare command would then edit it by accident.
-  if (!parsed.options.database) return fail(CLI_CODES.TARGET_REQUIRED);
+  if (!postgres && !parsed.options.database) return fail(CLI_CODES.TARGET_REQUIRED);
 
-  // Answered from the typed string: nothing below has touched the filesystem.
-  if (isUnsupportedNamespace(parsed.options.database)) {
+  if (!postgres && isUnsupportedNamespace(parsed.options.database)) {
     return fail(CLI_CODES.TARGET_UNSUPPORTED);
   }
 
-  const resolvedTarget = path.resolve(parsed.options.database);
+  const resolvedTarget = postgres ? null : path.resolve(parsed.options.database);
 
-  const scope = { ...env, GRANDMASTER_DB_PATH: resolvedTarget };
+  const scope = postgres ? { ...env } : { ...env, GRANDMASTER_DB_PATH: resolvedTarget };
 
   const password = await resolvePassword({ env: scope, stdin, stdout });
   if (!password) return fail(CLI_CODES.PASSWORD_UNAVAILABLE);
 
-  // Checked before storage is opened, so a mistyped password never leaves an
-  // empty database behind. The module repeats this rule and stays the authority.
   if (passwordProblem(password)) return fail(ADMIN_BOOTSTRAP_CODES.WEAK_PASSWORD);
 
-  const target = await targetIsAcceptable({
-    command: parsed.command,
-    resolvedTarget,
-    options: parsed.options,
-    env,
-    stdin,
-    stdout,
-    emit,
-    fail,
-  });
-  if (target.exit) return target.exit;
+  let baseline = null;
+  if (!postgres) {
+    const target = await targetIsAcceptable({
+      command: parsed.command,
+      resolvedTarget,
+      options: parsed.options,
+      env,
+      stdin,
+      stdout,
+      emit,
+      fail,
+    });
+    if (target.exit) return target.exit;
+    baseline = target.baseline;
+  } else {
+    emit("TARGET=postgres");
+  }
 
   let result;
   try {
-    // This call is what opens the file: `getDatabase` constructs the handle
-    // synchronously, while migration and seeding stay lazy until a statement.
     const db = getDatabase(scope);
     try {
-      if (identityDriftedAfterOpen({ baseline: target.baseline, resolvedTarget, env })) {
+      if (!postgres && identityDriftedAfterOpen({ baseline, resolvedTarget, env })) {
         return fail(CLI_CODES.IDENTITY_CHANGED);
       }
       result = parsed.command === "bootstrap"
