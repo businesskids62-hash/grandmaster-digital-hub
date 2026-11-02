@@ -20,6 +20,7 @@ delete process.env.NODE_ENV;
 const { closeDatabase, databaseStatus, getDatabase } = await import("../lib/db/index.js");
 const { MIGRATIONS } = await import("../lib/db/migrations.js");
 const { SEED_IDS } = await import("../lib/db/seed.js");
+const { provisionAdmin } = await import("../lib/auth/adminBootstrap.js");
 const { hashPassword, passwordProblem, verifyPasswordHash } = await import(
   "../lib/auth/passwords.js"
 );
@@ -147,6 +148,15 @@ function fakeRes() {
 
 const db = getDatabase(process.env);
 
+// Startup no longer writes any credential. The admin row these tests rely on is
+// created here, through the same helper the operator CLI drives.
+const bootstrap = await provisionAdmin(db, {
+  email: process.env.ADMIN_EMAIL,
+  password: process.env.ADMIN_PASSWORD,
+  env: process.env,
+});
+assert.equal(bootstrap.code, "ADMIN_CREATED");
+
 after(async () => {
   await closeDatabase();
   fs.rmSync(dataDir, { recursive: true, force: true });
@@ -191,7 +201,7 @@ test("migrations create the academy schema and seed one course with a quiz", asy
   assert.equal(status.migrations, MIGRATIONS.length);
 });
 
-test("seeded admin uses a bcrypt hash and per-user login replaces the shared password", async () => {
+test("the bootstrapped admin uses a bcrypt hash and per-user login replaces the shared password", async () => {
   const admin = await db.get("SELECT * FROM users WHERE email = ?", ["owner@example.com"]);
   assert.ok(admin);
   assert.equal(admin.role, "admin");
@@ -614,7 +624,7 @@ test("Academy sign-in refuses the configured admin address before any password c
   const before = await db.get("SELECT failed_attempts, session_version FROM users WHERE email = ?", [
     adminEmail,
   ]);
-  assert.ok(before, "the seeded admin row is needed for this proof");
+  assert.ok(before, "the bootstrapped admin row is needed for this proof");
 
   for (const submitted of [adminEmail, "OWNER@Example.COM", `  ${adminEmail}  `, "Owner@Example.com "]) {
     const denied = await academyLogin(submitted, "definitely-not-the-admin-password");

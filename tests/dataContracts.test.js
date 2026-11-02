@@ -71,6 +71,84 @@ test("duplicate email raises a CONFLICT repository error", async () => {
   );
 });
 
+// A uniqueness violation arrives shaped differently from each engine, and the
+// layers above cannot tell them apart. These cases pin the classifier with
+// fabricated error objects so no second database dependency is needed.
+function repositoryRejecting(cause) {
+  return createSqliteUsersRepository({
+    get: async () => null,
+    run: async () => {
+      throw cause;
+    },
+    transaction: async () => 0,
+  });
+}
+
+async function classify(cause) {
+  try {
+    await repositoryRejecting(cause).create({
+      id: randomUUID(),
+      email: nextEmail("classify"),
+      passwordHash: HASH,
+      createdAt: STAMP,
+      updatedAt: STAMP,
+    });
+  } catch (error) {
+    return error;
+  }
+  throw new Error("the repository must rethrow the classified failure");
+}
+
+const CONFLICT_SHAPES = [
+  ["SQLite message", new Error("UNIQUE constraint failed: users.email")],
+  [
+    "SQLite extended code",
+    Object.assign(new Error("constraint failed"), { code: "ERR_SQLITE_ERROR", errcode: 2067 }),
+  ],
+  ["SQLite named error", Object.assign(new Error("SQLITE_CONSTRAINT_UNIQUE"), { code: 2067 })],
+  [
+    "Postgres SQLSTATE on code",
+    Object.assign(new Error('duplicate key value violates unique constraint "users_email_key"'), {
+      code: "23505",
+    }),
+  ],
+  [
+    "Postgres SQLSTATE on sqlState",
+    Object.assign(new Error("insert or update on table violates a uniqueness rule"), {
+      sqlState: "23505",
+    }),
+  ],
+];
+
+for (const [label, cause] of CONFLICT_SHAPES) {
+  test(`a ${label} uniqueness violation is classified as CONFLICT`, async () => {
+    const error = await classify(cause);
+    assert.ok(isRepositoryError(error), `${label} must stay a repository error`);
+    assert.equal(error.code, "CONFLICT");
+    assert.equal(error.retryable, false);
+    assert.equal(error.cause, cause, "the original failure is kept for the logs");
+  });
+}
+
+test("non-uniqueness failures keep their previous classification", async () => {
+  const check = await classify(new Error("CHECK constraint failed: users_role_check"));
+  assert.equal(check.code, "CONSTRAINT");
+
+  const foreignKey = await classify(
+    Object.assign(new Error('insert or update on table "users" violates foreign key constraint'), {
+      code: "23503",
+    }),
+  );
+  assert.equal(foreignKey.code, "UNAVAILABLE");
+
+  const unavailable = await classify(new Error("SQLite is busy"));
+  assert.equal(unavailable.code, "UNAVAILABLE");
+  assert.equal(unavailable.retryable, true);
+
+  const alreadyClassified = new RepositoryError("kept", { code: "NOT_FOUND" });
+  assert.equal(await classify(alreadyClassified), alreadyClassified);
+});
+
 test("findAuthByEmail returns the hash and lock state", async () => {
   const email = nextEmail("auth");
   const created = await makeUser({ email, displayName: "Auth User" });
