@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { LegalFooter, Notice } from "./components.jsx";
 import { statusMessage } from "./api.js";
+import { signInWithGoogle } from "../lib/authHelpers.js";
 
 function Field({ id, label, type = "text", value, onChange, autoComplete, hint, required = true }) {
   return (
@@ -72,6 +73,19 @@ export function LoginScreen({ t, onSignIn, onNavigate, notice }) {
     }
   }
 
+  const [googleBusy, setGoogleBusy] = useState(false);
+
+  async function handleGoogleLogin() {
+    setError("");
+    setGoogleBusy(true);
+    try {
+      await signInWithGoogle();
+    } catch (err) {
+      setError(err?.message || "Google sign in failed.");
+      setGoogleBusy(false);
+    }
+  }
+
   return (
     <main className="ac-main ac-auth">
       <button type="button" className="ac-back" onClick={() => onNavigate("/academy")}>
@@ -80,11 +94,44 @@ export function LoginScreen({ t, onSignIn, onNavigate, notice }) {
       <h1>{t("signIn")}</h1>
       <p className="ac-muted">{t("welcomeBack")}</p>
       <Notice tone="success">{notice}</Notice>
+
+      <button
+        type="button"
+        className="ac-btn block google-login-btn"
+        onClick={handleGoogleLogin}
+        disabled={googleBusy || busy}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "10px",
+          marginBottom: "16px",
+          backgroundColor: "#ffffff",
+          color: "#1f2937",
+          border: "1px solid #d1d5db",
+          fontWeight: "600",
+        }}
+      >
+        <svg width="18" height="18" viewBox="0 0 18 18">
+          <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.616z"/>
+          <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/>
+          <path fill="#FBBC05" d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.961H.957C.347 6.175 0 7.55 0 9s.347 2.825.957 4.039l3.007-2.332z"/>
+          <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.293C4.672 5.166 6.656 3.58 9 3.58z"/>
+        </svg>
+        <span>{googleBusy ? "Connecting to Google..." : "Continue with Google"}</span>
+      </button>
+
+      <div style={{ display: "flex", alignItems: "center", margin: "14px 0", color: "#6b7280", fontSize: "12px" }}>
+        <div style={{ flex: 1, height: "1px", backgroundColor: "#e5e7eb" }} />
+        <span style={{ padding: "0 10px" }}>or sign in with email</span>
+        <div style={{ flex: 1, height: "1px", backgroundColor: "#e5e7eb" }} />
+      </div>
+
       <form onSubmit={submit} noValidate>
         <Field id="login-email" label={t("email")} type="email" value={email} onChange={setEmail} autoComplete="email" />
         <Field id="login-password" label={t("password")} type="password" value={password} onChange={setPassword} autoComplete="current-password" />
         {error && <Notice tone="danger">{error}</Notice>}
-        <button type="submit" className="ac-btn primary block" disabled={busy}>
+        <button type="submit" className="ac-btn primary block" disabled={busy || googleBusy}>
           {busy ? t("loading") : t("signIn")}
         </button>
       </form>
@@ -141,6 +188,19 @@ export function SignupScreen({ t, onSignUp, onNavigate }) {
     }
   }
 
+  const [googleBusy, setGoogleBusy] = useState(false);
+
+  async function handleGoogleLogin() {
+    setError("");
+    setGoogleBusy(true);
+    try {
+      await signInWithGoogle();
+    } catch (err) {
+      setError(err?.message || "Google sign in failed.");
+      setGoogleBusy(false);
+    }
+  }
+
   return (
     <main className="ac-main ac-auth">
       <button type="button" className="ac-back" onClick={() => onNavigate("/academy")}>
@@ -148,6 +208,39 @@ export function SignupScreen({ t, onSignUp, onNavigate }) {
       </button>
       <h1>{t("createAccountTitle")}</h1>
       <Notice tone="success">{info}</Notice>
+
+      <button
+        type="button"
+        className="ac-btn block google-login-btn"
+        onClick={handleGoogleLogin}
+        disabled={googleBusy || busy}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "10px",
+          marginBottom: "16px",
+          backgroundColor: "#ffffff",
+          color: "#1f2937",
+          border: "1px solid #d1d5db",
+          fontWeight: "600",
+        }}
+      >
+        <svg width="18" height="18" viewBox="0 0 18 18">
+          <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.616z"/>
+          <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/>
+          <path fill="#FBBC05" d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.961H.957C.347 6.175 0 7.55 0 9s.347 2.825.957 4.039l3.007-2.332z"/>
+          <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.293C4.672 5.166 6.656 3.58 9 3.58z"/>
+        </svg>
+        <span>{googleBusy ? "Connecting to Google..." : "Continue with Google"}</span>
+      </button>
+
+      <div style={{ display: "flex", alignItems: "center", margin: "14px 0", color: "#6b7280", fontSize: "12px" }}>
+        <div style={{ flex: 1, height: "1px", backgroundColor: "#e5e7eb" }} />
+        <span style={{ padding: "0 10px" }}>or register with email</span>
+        <div style={{ flex: 1, height: "1px", backgroundColor: "#e5e7eb" }} />
+      </div>
+
       <form onSubmit={submit} noValidate>
         <Field id="signup-name" label={t("displayName")} value={displayName} onChange={setDisplayName} autoComplete="nickname" required={false} />
         <Field id="signup-email" label={t("email")} type="email" value={email} onChange={setEmail} autoComplete="email" />
