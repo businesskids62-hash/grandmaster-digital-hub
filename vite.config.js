@@ -31,6 +31,31 @@ export default defineConfig(({ mode }) => {
         buildTime,
       }),
     },
+    build: {
+      target: "es2022",
+      chunkSizeWarningLimit: 600,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes("node_modules/chart.js") || id.includes("node_modules/react-chartjs-2")) {
+              return "chartjs-vendor";
+            }
+            if (id.includes("node_modules/framer-motion")) {
+              return "motion-vendor";
+            }
+            if (id.includes("node_modules/lucide-react")) {
+              return "lucide-vendor";
+            }
+            if (id.includes("node_modules/qrcode")) {
+              return "qrcode-vendor";
+            }
+            if (id.includes("node_modules/react") || id.includes("node_modules/react-dom") || id.includes("node_modules/react-router-dom")) {
+              return "react-vendor";
+            }
+          },
+        },
+      },
+    },
     server: {
       port: DEV_PORT,
       strictPort: false,

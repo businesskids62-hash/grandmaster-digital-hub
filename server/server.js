@@ -39,9 +39,12 @@ import {
   handleLogin,
   handleLogout,
   handleResetPassword,
+  handleResendVerify,
   handleSession,
   handleSignup,
+  handleVerifyEmail,
 } from "../lib/auth/routes.js";
+import approveUserHandler from "../api/admin/approve-user.js";
 import { handleAcademy } from "../lib/api/academy.js";
 import { handleAdminStats } from "../lib/admin/stats.js";
 import { getDatabase } from "../lib/db/index.js";
@@ -215,6 +218,32 @@ export function createApp() {
       requestId: req.requestId,
     });
     return sendResult(res, result);
+  });
+
+  app.all("/api/auth/verify-email", async (req, res) => {
+    const result = await handleVerifyEmail({
+      method: req.method,
+      query: req.query,
+      env: process.env,
+      requestId: req.requestId,
+    });
+    return sendResult(res, result);
+  });
+
+  app.all("/api/auth/resend-verify", async (req, res) => {
+    const result = await handleResendVerify({
+      method: req.method,
+      headers: req.headers,
+      body: req.body,
+      env: process.env,
+      clientKey: req.ip,
+      requestId: req.requestId,
+    });
+    return sendResult(res, result);
+  });
+
+  app.all("/api/admin/approve-user", sessionGate, async (req, res) => {
+    return approveUserHandler(req, res);
   });
 
   app.all("/api/auth/session", async (req, res) => {

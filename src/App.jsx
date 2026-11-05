@@ -12,10 +12,16 @@ import { doubleBrain } from "./agents/doubleBrain.js";
 import { systemDoctor } from "./agents/systemDoctor.js";
 import { agentOrchestrator } from "./agents/agentOrchestrator.js";
 import { startWakeWord, speakRoar } from "./utils/wakeWord.js";
+import { lazy, Suspense } from "react";
 import AgentDesks from "./pages/AgentDesks.jsx";
-import Mt5Monitor from "./pages/Mt5Monitor.jsx";
 import BrowserOperator from "./pages/BrowserOperator.jsx";
+import Mt5Monitor from "./pages/Mt5Monitor.jsx";
 import HealthPage from "./pages/HealthPage.jsx";
+
+const GrandmasterChat = lazy(() => import("./pages/GrandmasterChat.jsx"));
+const AgentNigrani = lazy(() => import("./pages/AgentNigrani.jsx"));
+const AdminDashboard = lazy(() => import("./pages/AdminDashboard.jsx"));
+const DownloadPage = lazy(() => import("./pages/DownloadPage.jsx"));
 import {
   buildDebugPack,
   buildDebugPackJson,
@@ -113,6 +119,10 @@ const GREETING = {
 
 const NAVIGATION = [
   { id: "overview", icon: "◈", label: "Command Center" },
+  { id: "nigrani", icon: "🛡️", label: "Agent Nigrani (6-Fleet)" },
+  { id: "grandmaster", icon: "👑", label: "Grandmaster Dost & Voice" },
+  { id: "download", icon: "📲", label: "Download & PWA" },
+  { id: "admin", icon: "👥", label: "Admin Approval" },
   { id: "health", icon: "✚", label: "Health" },
   { id: "assistant", icon: "✦", label: "Grandmaster AI" },
   { id: "memory", icon: "◉", label: "Memory" },
@@ -983,16 +993,22 @@ function App() {
   });
   const att = useAttachments();
 
-  const initialPage =
-    typeof window !== "undefined" &&
-    window.location.pathname.replace(/\/+$/, "") === "/health"
-      ? "health"
-      : "overview";
-  const [page, setPage] = useState(initialPage);
+  const getInitialPathPage = () => {
+    if (typeof window === "undefined") return "overview";
+    const path = window.location.pathname.replace(/\/+$/, "");
+    if (path === "/health") return "health";
+    if (path === "/download") return "download";
+    if (path === "/grandmaster") return "grandmaster";
+    if (path === "/nigrani") return "nigrani";
+    if (path === "/dashboard" || path === "/admin") return "admin";
+    return "overview";
+  };
+
+  const [page, setPage] = useState(getInitialPathPage);
   useSeo({
     title: `${PAGE_TITLES[page] || "Command Center"} | Grandmaster Digital Hub`,
     description: "Private operations dashboard for Grandmaster Digital Hub.",
-    path: page === "health" ? "/health" : "/",
+    path: page === "health" ? "/health" : page === "download" ? "/download" : "/",
     robots: "noindex,nofollow",
   });
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1642,7 +1658,15 @@ function App() {
     setPage(id);
     setMenuOpen(false);
     if (typeof window === "undefined") return;
-    const target = id === "health" ? "/health" : "/";
+    const pathMap = {
+      health: "/health",
+      download: "/download",
+      grandmaster: "/grandmaster",
+      nigrani: "/nigrani",
+      admin: "/dashboard",
+      overview: "/",
+    };
+    const target = pathMap[id] || "/";
     const current = window.location.pathname.replace(/\/+$/, "") || "/";
     if (current !== target) {
       window.history.replaceState({}, "", target);
@@ -3482,6 +3506,10 @@ function App() {
     desks: () => <AgentDesks apiBase={API_BASE} />,
     operator: () => <BrowserOperator apiBase={API_BASE} />,
     mt5: () => <Mt5Monitor apiBase={API_BASE} />,
+    nigrani: () => <AgentNigrani apiBase={API_BASE} />,
+    grandmaster: () => <GrandmasterChat />,
+    download: () => <DownloadPage />,
+    admin: () => <AdminDashboard />,
     roadmap: renderRoadmap,
     projects: renderProjects,
     business: renderBusiness,
@@ -3624,7 +3652,9 @@ function App() {
           </header>
 
           <main className="gm-content">
-            {(renderers[page] || renderOverview)()}
+            <Suspense fallback={<div className="p-8 text-center text-slate-400">Loading module...</div>}>
+              {(renderers[page] || renderOverview)()}
+            </Suspense>
             <footer className="gm-footer">
               GRANDMASTER DIGITAL HUB · LEARN · BUILD · EARN
               <br />
