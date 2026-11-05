@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -16,7 +16,7 @@ import { Line, Doughnut } from 'react-chartjs-2';
 import { 
   DollarSign, Users, ShoppingCart, Activity, ShieldAlert, 
   Lock, Unlock, ArrowUpRight, BarChart3, PieChart, Layers, 
-  Menu, X, CheckCircle, Database 
+  Menu, X, CheckCircle, Database, UserCheck, UserX, AlertCircle
 } from 'lucide-react';
 import { dashboardData } from '../data/dashboardData';
 import { useLanguage } from '../hooks/useLanguage';
@@ -40,8 +40,49 @@ export default function AdminDashboard() {
   const { isDark } = useTheme();
 
   const [isAuthenticated, setIsAuthenticated] = useState(true);
-  const [activeTab, setActiveTab] = useState('overview'); // overview, orders, courses, tools
+  const [activeTab, setActiveTab] = useState('overview'); // overview, pending, orders, courses, tools
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [pendingUsers, setPendingUsers] = useState([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [actionMessage, setActionMessage] = useState('');
+
+  const fetchPendingUsers = async () => {
+    setPendingLoading(true);
+    try {
+      const res = await fetch('/api/admin/approve-user');
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.users)) {
+        setPendingUsers(data.users);
+      }
+    } catch {}
+    setPendingLoading(false);
+  };
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchPendingUsers();
+    }
+  }, [isAuthenticated]);
+
+  const handleApproveReject = async (userId, status) => {
+    setActionMessage('');
+    try {
+      const res = await fetch('/api/admin/approve-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, status }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setActionMessage(`User ${status.toLowerCase()}ed successfully.`);
+        fetchPendingUsers();
+      } else {
+        setActionMessage(data.error || 'Action failed');
+      }
+    } catch (err) {
+      setActionMessage('Failed to update user status.');
+    }
+  };
 
   // Chart configuration with dark/light theme awareness
   const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.06)';
@@ -174,6 +215,28 @@ export default function AdminDashboard() {
               </button>
 
               <button
+                onClick={() => {
+                  setActiveTab('pending');
+                  fetchPendingUsers();
+                }}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition ${
+                  activeTab === 'pending'
+                    ? 'bg-brand-gold-500/15 text-brand-gold-600 dark:text-brand-gold-400 font-bold border border-brand-gold-500/30'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-brand-navy-700'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  <UserCheck className="w-4 h-4" />
+                  <span>Pending Users Approval</span>
+                </div>
+                {pendingUsers.length > 0 && (
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500 text-slate-950 font-mono">
+                    {pendingUsers.length}
+                  </span>
+                )}
+              </button>
+
+              <button
                 onClick={() => setActiveTab('orders')}
                 className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl transition ${
                   activeTab === 'orders'
@@ -223,6 +286,96 @@ export default function AdminDashboard() {
 
           {/* Main Dashboard Workspace */}
           <main className="lg:col-span-9 space-y-6">
+            {/* Pending Users Approval Tab / Section */}
+            {activeTab === 'pending' ? (
+              <div className="p-6 bg-white dark:bg-brand-navy-800/90 rounded-3xl border border-slate-200 dark:border-brand-navy-700 shadow-xl space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-2">
+                      <UserCheck className="w-4 h-4 text-amber-500" />
+                      <span>Pending Users - Owner Approval Required</span>
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Flow: Signup &rarr; Email Verified &rarr; Owner Approval &rarr; ACTIVE &amp; Welcome Message
+                    </p>
+                  </div>
+                  <button
+                    onClick={fetchPendingUsers}
+                    className="text-xs px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-brand-navy-900 text-slate-700 dark:text-slate-200 font-bold"
+                  >
+                    Refresh
+                  </button>
+                </div>
+
+                {actionMessage && (
+                  <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs">
+                    {actionMessage}
+                  </div>
+                )}
+
+                {pendingLoading ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">Loading pending users...</p>
+                ) : pendingUsers.length === 0 ? (
+                  <div className="py-10 text-center text-slate-400 text-xs">
+                    <CheckCircle className="w-8 h-8 mx-auto text-emerald-400 mb-2 opacity-60" />
+                    <span>No users currently pending approval. All caught up!</span>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-200 dark:border-brand-navy-700 text-slate-400 uppercase">
+                          <th className="py-2.5 px-3 font-semibold">Email</th>
+                          <th className="py-2.5 px-3 font-semibold">Display Name</th>
+                          <th className="py-2.5 px-3 font-semibold">Email Verified</th>
+                          <th className="py-2.5 px-3 font-semibold">Status</th>
+                          <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-brand-navy-700/60 font-mono">
+                        {pendingUsers.map((u) => (
+                          <tr key={u.id} className="hover:bg-slate-50 dark:hover:bg-brand-navy-700/40">
+                            <td className="py-3 px-3 text-slate-900 dark:text-white font-sans">{u.email}</td>
+                            <td className="py-3 px-3 text-slate-600 dark:text-slate-300 font-sans">{u.displayName || '—'}</td>
+                            <td className="py-3 px-3">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  u.emailVerified
+                                    ? 'bg-emerald-500/15 text-emerald-400'
+                                    : 'bg-amber-500/15 text-amber-400'
+                                }`}
+                              >
+                                {u.emailVerified ? 'YES' : 'PENDING'}
+                              </span>
+                            </td>
+                            <td className="py-3 px-3">
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-500">
+                                {u.status}
+                              </span>
+                            </td>
+                            <td className="py-3 px-3 text-right space-x-2 font-sans">
+                              <button
+                                onClick={() => handleApproveReject(u.id, 'ACTIVE')}
+                                className="px-3 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold text-xs shadow-sm transition"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => handleApproveReject(u.id, 'REJECTED')}
+                                className="px-3 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-300 font-bold text-xs transition"
+                              >
+                                Reject
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
             {/* Stat Cards 4-pack */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {/* Earnings */}
